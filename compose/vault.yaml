@@ -1,0 +1,57 @@
+# Vault server for one environment. Its own Compose project (glowderma-<env>-vault): application deploys never
+# recreate or restart it. scripts/deploy.sh only starts it when it is not running.
+#
+#   storage: integrated Raft in the named volume "vault-data" (mounted at /vault/file, a directory the image
+#            already owns, so the volume inherits the vault user's ownership)
+#   TLS:     always on; certificates from scripts/vault/gen-tls.sh in /opt/glowderma/runtime/vault/tls
+#   access:  no published port. Administration only from the host: scripts/vault/*.sh run
+#            `docker compose exec vault vault ...`; agents reach it over the internal network below.
+name: glowderma-${GLOWDERMA_ENV:?}-vault
+
+services:
+  vault:
+    image: hashicorp/vault:2.2.1@sha256:962a92876e168d68eaaa24b0b8b49bbce1cb63024060a67bba95cd158a366fc2
+    # The image's own vault user. As root the entrypoint would need setcap/su-exec capabilities.
+    user: "100:1000"
+    command: ["server", "-config=/vault/config/vault.hcl"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    environment:
+      VAULT_ADDR: https://127.0.0.1:8200
+      VAULT_CACERT: /vault/tls/ca.crt
+      # Keeps `vault` CLI calls inside the container from writing ~/.vault-token (read-only rootfs).
+      VAULT_DISABLE_REDIRECTS: "true"
+      SKIP_SETCAP: "true"
+      SKIP_CHOWN: "true"
+    volumes:
+      - ../vault/config:/vault/config:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/tls:/vault/tls:ro
+      - vault-data:/vault/file
+      - vault-logs:/vault/logs
+    tmpfs: ["/tmp", "/home/vault:uid=100,gid=1000,mode=0700"]
+    networks:
+      vault: {ipv4_address: 172.30.3.10}
+    mem_limit: 256m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "5"}
+    healthcheck:
+      # Healthy = the API answers (sealed or not). Exit 1 means unreachable; 2 means sealed.
+      test: ["CMD-SHELL", "vault status >/dev/null 2>&1; [ $$? -ne 1 ]"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+networks:
+  vault:
+    name: glowderma-${GLOWDERMA_ENV}-vault
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.3.0/24}]
+
+volumes:
+  vault-data:
+  vault-logs:

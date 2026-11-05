@@ -1,0 +1,1 @@
+{{- with secret (printf "secret/data/%s/redis" (env "GLOWDERMA_ENV")) }}requirepass {{ .Data.data.password }}{{ end }}

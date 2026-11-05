@@ -1,0 +1,118 @@
+# Promote what staging runs (or an explicit older build, for a rollback) to production.
+#
+# Writes environments/production/<app>/image.env and commits it to main. That commit starts "Deploy production",
+# which waits for a required reviewer on the "production" environment. Nothing is rebuilt:
+#   backend   the exact digest staging runs
+#   frontend  the sibling image built from the same commit with the production domain (frontend-<sha>-production)
+# Both are verified first: the tag still points at the recorded digest, and the image carries a provenance
+# attestation from the app repo's ci.yml on main.
+name: Promote to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: What to promote
+        type: choice
+        options: [both, backend, frontend]
+        default: both
+      tag:
+        description: "Optional: an older build to roll back to (backend-<sha7> or frontend-<sha7>); empty = what staging runs"
+        type: string
+        default: ""
+      scan_policy:
+        description: report = scan without blocking (rollback to an image with newly published CVEs)
+        type: choice
+        options: [enforce, report]
+        default: enforce
+
+permissions: {}
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Resolve, verify and write production image.env
+        id: write
+        env:
+          APP: ${{ inputs.app }}
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          value() { sed -n "s/^$2=//p" "$1"; }
+          resolve() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' | jq -r .digest; }
+          label() { docker buildx imagetools inspect "$1" --format '{{json .Image}}' |
+                    jq -r --arg k "$2" '[.. | objects | .config?.Labels?[$k]? // empty] | first // ""'; }
+          apps="$APP"; [ "$APP" = both ] && apps="backend frontend"
+          summary=""
+          for app in $apps; do
+            upper="$(echo "$app" | tr '[:lower:]' '[:upper:]')"
+            staging="environments/staging/$app/image.env"
+            image="$(value "$staging" "${upper}_IMAGE")"
+            if [ -n "$TAG" ]; then
+              case "$TAG" in "$app"-*) ;; *) [ "$APP" = both ] && { echo "::error::a tag can only roll back one app"; exit 1; } ;; esac
+              sha7="$(echo "$TAG" | sed -E "s/^$app-([0-9a-f]{7,40}).*/\1/")"
+            else
+              staging_tag="$(value "$staging" "${upper}_TAG")"
+              [ -n "$staging_tag" ] || { echo "::error::staging has no $app image yet"; exit 1; }
+              sha7="$(echo "$staging_tag" | sed -E "s/^$app-([0-9a-f]{7,40}).*/\1/")"
+            fi
+            if [ "$app" = backend ]; then tag="backend-$sha7"; else tag="frontend-$sha7-production"; fi
+            digest="$(resolve "$image:$tag")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::$image:$tag does not exist (cleaned up?)"; exit 1; }
+            if [ -z "$TAG" ] && [ "$app" = backend ] && [ "$digest" != "$(value "$staging" BACKEND_DIGEST)" ]; then
+              echo "::error::$tag now points at $digest, not the digest staging runs: refusing to promote an unscanned rebuild"
+              exit 1
+            fi
+            gh attestation verify "oci://$image@$digest" --repo "GlowDermatology/$app" \
+              --signer-workflow "GlowDermatology/$app/.github/workflows/ci.yml" --source-ref refs/heads/main \
+              --predicate-type https://slsa.dev/provenance/v1 >/dev/null
+            echo "verified provenance of $image@$digest"
+            source_sha="$(label "$image@$digest" org.opencontainers.image.revision)"
+            built_at="$(label "$image@$digest" org.opencontainers.image.created)"
+            printf '%s\n' \
+              "# Written ONLY by automation: the $app pipeline (staging) or the promote workflow (production)." \
+              "# The digest is what runs; the tag is for humans. Empty digest = nothing published yet (deploy waits)." \
+              "${upper}_IMAGE=$image" "${upper}_TAG=$tag" "${upper}_DIGEST=$digest" \
+              "${upper}_SOURCE_SHA=$source_sha" "${upper}_BUILT_AT=$built_at" > "environments/production/$app/image.env"
+            summary="$summary $tag"
+          done
+          if git diff --quiet; then echo "::notice::production already runs$summary"; echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          git diff
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+      - name: Commit to main (starts "Deploy production", which waits for approval)
+        if: steps.write.outputs.changed == 'true'
+        env:
+          TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
+          SUMMARY: ${{ steps.write.outputs.summary }}
+          POLICY: ${{ inputs.scan_policy }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ -n "$TOKEN" ] || { echo "::error::secret INFRA_REPO_TOKEN is missing (a push with GITHUB_TOKEN would not start the deploy)"; exit 1; }
+          suffix=""; [ "$POLICY" = report ] && suffix=" [scan-policy:report]"
+          git config user.name "glowderma-gitops"
+          git config user.email "gitops@users.noreply.github.com"
+          git add environments/production
+          git commit -q -m "promote(production):$SUMMARY$suffix" -m "Requested by @$ACTOR via the Promote workflow."
+          git push -q "https://x-access-token:$TOKEN@github.com/$REPO.git" HEAD:main
+          echo "::notice::promoted$SUMMARY; approve the 'Deploy production' run to roll it out"

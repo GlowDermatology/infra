@@ -1,0 +1,9 @@
+{{- /* Every key of secret/<env>/frontend becomes an environment variable of the Next server
+       (entrypoint.mjs loads this file before server.js starts). */ -}}
+{{- $env := env "GLOWDERMA_ENV" -}}
+{
+{{- with secret (printf "secret/data/%s/frontend" $env) }}{{ range $key, $value := .Data.data }}
+  {{ $key | toJSON }}: {{ $value | toJSON }},{{ end }}{{ end }}
+{{- with secret (printf "secret/data/%s/shared" $env) }}
+  "GLOWDERMA_INTERNAL_SECRET": {{ .Data.data.INTERNAL_API_SECRET | toJSON }}{{ end }}
+}

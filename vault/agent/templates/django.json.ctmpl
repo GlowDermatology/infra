@@ -1,0 +1,15 @@
+{{- /* Every key of secret/<env>/django becomes an environment variable of the Django processes
+       (config/secrets.py loads this file before the settings read os.environ). The shared and
+       datastore credentials are composed below, so each value is stored in Vault exactly once. */ -}}
+{{- $env := env "GLOWDERMA_ENV" -}}
+{
+{{- with secret (printf "secret/data/%s/django" $env) }}{{ range $key, $value := .Data.data }}
+  {{ $key | toJSON }}: {{ $value | toJSON }},{{ end }}{{ end }}
+{{- with secret (printf "secret/data/%s/shared" $env) }}
+  "INTERNAL_API_SECRET": {{ .Data.data.INTERNAL_API_SECRET | toJSON }},{{ end }}
+{{- with secret (printf "secret/data/%s/db-app" $env) }}
+  "POSTGRES_PASSWORD": {{ .Data.data.password | toJSON }},{{ end }}
+{{- with secret (printf "secret/data/%s/redis" $env) }}
+  "REDIS_URL": {{ printf "redis://:%s@redis:6379/0" .Data.data.password | toJSON }},
+  "CELERY_BROKER_URL": {{ printf "redis://:%s@redis:6379/1" .Data.data.password | toJSON }}{{ end }}
+}

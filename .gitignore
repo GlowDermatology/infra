@@ -1,0 +1,14 @@
+# Never commit runtime material: certificates, AppRole files, rendered secrets, backups, local settings.
+*.key
+*.pem
+*.crt
+*.snap
+*.dump
+*.age
+secret_id*
+role_id
+local.env
+.env
+runtime/
+__pycache__/
+*.sarif

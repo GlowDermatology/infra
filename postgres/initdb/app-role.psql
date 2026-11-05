@@ -1,0 +1,65 @@
+-- The application's role: glowderma_app owns the database and every object of the public schema, so the
+-- migrations run as it (pg_trgm and btree_gist are trusted extensions: a database owner creates them), but it
+-- is not a superuser: no COPY ... TO PROGRAM, no server file access, no session_replication_role to switch
+-- the append-only triggers off. The superuser POSTGRES_USER (glowderma) stays for administration (psql,
+-- pg_dump, pg_restore) over the container's local socket.
+--
+-- Run by 10-app-role.sh (psql --set app_password=...), never by the image directly (not named *.sql). Idempotent: on an empty database it creates the role and
+-- hands it the database; on a database the superuser populated (an M1 volume) it also hands over the existing
+-- tables, sequences, views, functions, collations and types. Extension members stay with the extension's
+-- owner (nothing in the application alters them). Not named *.sql, so the image does not run it on its own.
+
+SELECT 'CREATE ROLE glowderma_app'
+ WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'glowderma_app')
+\gexec
+ALTER ROLE glowderma_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT
+    PASSWORD :'app_password';
+
+SELECT format('ALTER DATABASE %I OWNER TO glowderma_app', current_database())
+\gexec
+
+-- Relations (indexes, TOAST tables, identity and serial sequences follow their table).
+SELECT format('ALTER %s %s OWNER TO glowderma_app',
+              CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE'
+                             WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END,
+              c.oid::regclass)
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname = 'public'
+   AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+   AND c.relowner <> 'glowderma_app'::regrole
+   AND NOT EXISTS (SELECT FROM pg_depend d
+                    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('e', 'a', 'i'))
+ ORDER BY c.oid
+\gexec
+
+-- Functions (the append-only trigger functions) and procedures.
+SELECT format('ALTER ROUTINE %s OWNER TO glowderma_app', p.oid::regprocedure)
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE n.nspname = 'public'
+   AND p.proowner <> 'glowderma_app'::regrole
+   AND NOT EXISTS (SELECT FROM pg_depend d
+                    WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+\gexec
+
+-- Collations (glowderma_ci).
+SELECT format('ALTER COLLATION %s OWNER TO glowderma_app', c.oid::regcollation)
+  FROM pg_collation c
+  JOIN pg_namespace n ON n.oid = c.collnamespace
+ WHERE n.nspname = 'public'
+   AND c.collowner <> 'glowderma_app'::regrole
+   AND NOT EXISTS (SELECT FROM pg_depend d
+                    WHERE d.classid = 'pg_collation'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+\gexec
+
+-- Domains, enums and range types (none today; kept for completeness).
+SELECT format('ALTER TYPE %s OWNER TO glowderma_app', t.oid::regtype)
+  FROM pg_type t
+  JOIN pg_namespace n ON n.oid = t.typnamespace
+ WHERE n.nspname = 'public'
+   AND t.typtype IN ('d', 'e', 'r')
+   AND t.typowner <> 'glowderma_app'::regrole
+   AND NOT EXISTS (SELECT FROM pg_depend d
+                    WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+\gexec
