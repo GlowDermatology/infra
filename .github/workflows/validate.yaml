@@ -35,7 +35,8 @@ jobs:
       - name: scripts/validate.sh (compose for both envs, structural rules, Caddy validate + edge probe, shellcheck)
         run: CADDY_BIN="$RUNNER_TEMP/bin/caddy" scripts/validate.sh
       - name: Vault end to end (policies, negative authorization, real agents rendering every template)
-        run: VAULT_BIN="$RUNNER_TEMP/bin/vault" scripts/ci/test-vault.sh
+        # As root: configure.sh writes the AppRole files owned by the agents' UIDs, exactly as on a server.
+        run: sudo --preserve-env=PATH VAULT_BIN="$RUNNER_TEMP/bin/vault" scripts/ci/test-vault.sh
 
   security-gitleaks:
     name: Secrets in history (gitleaks)
