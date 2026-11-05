@@ -1,0 +1,33 @@
+# Every infra commit to main that touches staging or shared files deploys staging automatically.
+# A commit whose message contains [scan-policy:report] (a rollback promotion) scans without blocking.
+name: Deploy staging
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - environments/staging/**
+      - compose/**
+      - caddy/**
+      - vault/**
+      - postgres/**
+      - scripts/**
+  workflow_dispatch:
+    inputs:
+      scan_policy:
+        type: choice
+        options: [enforce, report]
+        default: enforce
+
+permissions: {}
+
+jobs:
+  deploy:
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/_deploy.yaml
+    with:
+      environment: staging
+      scan_policy: ${{ inputs.scan_policy || (contains(github.event.head_commit.message, '[scan-policy:report]') && 'report' || 'enforce') }}

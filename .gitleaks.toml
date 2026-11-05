@@ -1,0 +1,7 @@
+# gitleaks: default rules plus an allow-list for the obviously fake values the CI tests use.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "fake digests and test fixtures"
+regexes = ['''sha256:0{64}''', '''sha256:1{64}''', '''probe-[a-z-]+-0123456789abcdef''']

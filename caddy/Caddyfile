@@ -1,0 +1,164 @@
+# Glow Derma edge (compose/app.yaml service "edge"). Caddy obtains and renews the TLS certificates (ACME) and
+# serves HTTP/1.1, HTTP/2 and HTTP/3 (QUIC on 443/udp, advertised with Alt-Svc) over IPv4 and IPv6.
+#
+#   SITE_DOMAIN       one origin for everything users see:
+#                       /api/v1/*   Django (customer API, provider webhooks, POS, health)
+#                       /media/*    uploaded files from the media directory
+#                       everything else, including /admin and Next's own /api/shop/* and /api/revalidate: Next.js
+#   www.SITE_DOMAIN   redirects to SITE_DOMAIN
+#   OPS_DOMAIN        Django ops console (/django-admin/ + its /static/), only for OPS_ALLOWED_IPS (space separated);
+#                     everyone else gets an empty 404
+#
+# Header contract: Caddy trusts no upstream proxy, so X-Forwarded-For is always overwritten with the TCP peer.
+# Django trusts that header only from this container's fixed address (TRUSTED_PROXIES). Never put a CDN or a
+# second proxy in front without revisiting that: throttles, the Click/Payme allow-lists and the console gate read it.
+#
+# Change -> commit -> deploy: scripts/deploy.sh reloads Caddy in place (zero downtime; a config that does not load
+# leaves the running one active). Local check: scripts/validate.sh (caddy validate + caddy/edge_probe.py).
+
+# Log redaction for the access logs AND the default logger (it receives the error line of a request the upstream
+# could not answer). Query strings never reach a log: the BTS webhook authenticates with ?token=, admin searches
+# carry phone numbers, the OAuth callback carries code and state. Caddy itself redacts Cookie, Set-Cookie,
+# Authorization and Proxy-Authorization.
+(redact) {
+	request>uri regexp "\?.*$" "?REDACTED"
+	request>headers>Referer regexp "\?.*$" "?REDACTED"
+	request>headers>X-Gd-Webhook-Token delete
+	request>headers>X-Gd-Internal-Secret delete
+}
+
+{
+	email {$ACME_EMAIL}
+	servers {
+		# Headers within 10 s, the whole request within 60 s: a trickling client cannot hold a connection.
+		timeouts {
+			read_header 10s
+			read_body 60s
+		}
+	}
+	log default {
+		output stderr
+		format filter {
+			wrap json
+			fields {
+				import redact
+			}
+		}
+	}
+}
+
+(common) {
+	encode zstd gzip
+	header {
+		-Server
+		-Via
+		Strict-Transport-Security "max-age=31536000"
+	}
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				import redact
+			}
+		}
+	}
+}
+
+(django) {
+	reverse_proxy {$API_UPSTREAM:172.30.0.30:8000} {
+		# The first MiB is read here before Django sees the request: a slow sender never holds a gunicorn thread.
+		request_buffers 1MiB
+	}
+}
+
+{$SITE_DOMAIN} {
+	import common
+
+	# Uploaded media, re-encoded by Django and stored under content-hashed names.
+	handle_path /media/* {
+		root * {$MEDIA_ROOT:/srv/media}
+		header {
+			Cache-Control "public, max-age=604800"
+			X-Content-Type-Options nosniff
+			Content-Security-Policy "default-src 'none'; img-src 'self'; sandbox"
+		}
+		file_server
+	}
+
+	# Staff-only Django surfaces stay private: the Next server calls 172.30.0.30:8000 directly. Django refuses them
+	# from any other address as well (ADMIN_API_ALLOWED_NETS + the internal secret); this keeps them invisible.
+	@private path /api/v1/admin /api/v1/admin/* /api/v1/schema /api/v1/schema/* /api/v1/docs /api/v1/docs/* /api/v1/dev /api/v1/dev/* /django-admin /django-admin/*
+	handle @private {
+		respond 404
+	}
+
+	# Provider callbacks (Click, Payme, BTS with ?token=) and cashier terminals: tiny bodies.
+	@callbacks path /api/v1/webhooks/* /api/v1/pos/*
+	handle @callbacks {
+		request_body {
+			max_size 1MiB
+		}
+		import django
+	}
+
+	# Customer API and health. Django's own ceiling is 6 MiB (profile image <= 5 MiB plus multipart framing).
+	handle /api/v1/* {
+		request_body {
+			max_size 6MiB
+		}
+		import django
+	}
+
+	# Next.js: storefront, admin panel (BFF) and Next's own /api/shop/* and /api/revalidate routes.
+	# Server Actions carry images (5 MiB each) plus multipart overhead; Next refuses above 6 MB.
+	handle {
+		request_body {
+			max_size 7MB
+		}
+		reverse_proxy {$FRONTEND_UPSTREAM:172.30.0.20:3000} {
+			# Partially prerendered pages stream: flush every chunk to the browser.
+			flush_interval -1
+		}
+	}
+}
+
+www.{$SITE_DOMAIN} {
+	import common
+	redir https://{$SITE_DOMAIN}{uri} 308
+}
+
+{$OPS_DOMAIN} {
+	import common
+	# Ops console (django-unfold). Its pages load only same-origin files; Unfold needs 'unsafe-inline' styles and
+	# Alpine's standard build needs 'unsafe-eval'. Deferred (>): these replace Django's own values.
+	header {
+		>Content-Security-Policy "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+		>X-Frame-Options DENY
+		>X-Content-Type-Options nosniff
+		>Referrer-Policy same-origin
+		>Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), interest-cohort=()"
+		>Cross-Origin-Opener-Policy same-origin
+		>X-Robots-Tag "noindex, nofollow"
+	}
+	request_body {
+		max_size 7MB
+	}
+	# A literal order: an address outside the allow-list learns nothing, not even the redirect.
+	route {
+		@denied not remote_ip {$OPS_ALLOWED_IPS:127.0.0.1/32}
+		respond @denied 404
+		@root path /
+		redir @root /django-admin/ 302
+		handle_path /media/* {
+			root * {$MEDIA_ROOT:/srv/media}
+			header Cache-Control "public, max-age=604800"
+			file_server
+		}
+		@console path /django-admin /django-admin/* /static/*
+		reverse_proxy @console {$API_UPSTREAM:172.30.0.30:8000} {
+			request_buffers 1MiB
+		}
+		respond 404
+	}
+}

@@ -1,0 +1,34 @@
+# Every infra commit to main that touches production or shared files (usually a promotion) deploys production
+# AFTER a required reviewer approves the "production" environment.
+# A commit whose message contains [scan-policy:report] (a rollback promotion) scans without blocking.
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - environments/production/**
+      - compose/**
+      - caddy/**
+      - vault/**
+      - postgres/**
+      - scripts/**
+  workflow_dispatch:
+    inputs:
+      scan_policy:
+        type: choice
+        options: [enforce, report]
+        default: enforce
+
+permissions: {}
+
+jobs:
+  deploy:
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/_deploy.yaml
+    with:
+      environment: production
+      scan_policy: ${{ inputs.scan_policy || (contains(github.event.head_commit.message, '[scan-policy:report]') && 'report' || 'enforce') }}

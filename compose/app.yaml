@@ -1,0 +1,345 @@
+# Glow Derma application stack. ONE file for every environment; the values live in environments/<env>/.
+#
+# Never run this by hand with plain `docker compose`: scripts/deploy.sh builds the exact command
+# (project name glowderma-<env>, the env files, the image pins) and refuses the wrong environment.
+#
+#   edge (Caddy, :80 :443/tcp :443/udp, IPv4 + IPv6) ──► frontend  172.30.0.20:3000   (everything except /api/v1)
+#                                                   └─► backend-api 172.30.0.30:8000  (/api/v1/*)
+#   backend-migrate ─► backend-api / backend-worker / backend-beat ─► postgres, redis   (network "back", no internet)
+#   vault-agent-{backend,frontend,datastores} ─► Vault (separate project, network glowderma-<env>-vault)
+#
+# Every hop inside the stack uses a fixed IPv4 literal on purpose: Django trusts X-Forwarded-For only from the
+# edge's address and accepts /api/v1/admin/* only from the frontend's address. A DNS name could resolve to an
+# IPv6 address and silently break both gates. scripts/validate.sh checks these literals stay consistent.
+name: glowderma-${GLOWDERMA_ENV:?GLOWDERMA_ENV missing (environments/<env>/stack.env)}
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "20m", max-file: "5"}
+
+# Hardening shared by every service.
+x-hardened: &hardened
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  logging: *logging
+
+x-agent: &agent
+  <<: *hardened
+  image: hashicorp/vault:2.2.1@sha256:962a92876e168d68eaaa24b0b8b49bbce1cb63024060a67bba95cd158a366fc2
+  tmpfs: ["/tmp"]
+  networks: [vault]
+  mem_limit: 64m
+  pids_limit: 64
+
+x-backend: &backend
+  <<: *hardened
+  image: ${BACKEND_IMAGE:?}:${BACKEND_TAG:?}@${BACKEND_DIGEST:?backend image not published yet}
+  user: "10001:10001"
+  env_file: ../environments/${GLOWDERMA_ENV}/backend.env
+  environment: &backend-env
+    DJANGO_SETTINGS_MODULE: config.settings.production
+    # Rendered by vault-agent-backend: every secret, including the DB and Redis credentials.
+    DJANGO_SECRETS_FILE: /run/secrets/django.json
+    POSTGRES_NAME: glowderma
+    POSTGRES_USER: glowderma_app
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    # The public site, the ops console host, and the address the Next server calls.
+    ALLOWED_HOSTS: ${SITE_DOMAIN:?},${OPS_DOMAIN:?},172.30.0.30
+    ADMIN_API_ALLOWED_NETS: 172.30.0.20/32
+    TRUSTED_PROXIES: 172.30.0.10/32
+    # gunicorn: trust X-Forwarded-Proto only from the edge, so request.is_secure() is true behind TLS.
+    FORWARDED_ALLOW_IPS: 172.30.0.10
+    OPS_DOMAIN: ${OPS_DOMAIN}
+    OPS_ADMIN_ALLOWED_NETS: ${OPS_ALLOWED_IPS:-127.0.0.1/32}
+    PUBLIC_MEDIA_BASE_URL: https://${SITE_DOMAIN}/media/
+    PAYMENT_RETURN_URL: https://${SITE_DOMAIN}/pay/return
+    PAYMENT_WEB_RETURN_URL: https://${SITE_DOMAIN}{locale_prefix}/buyurtmalar/{order_id}?paid=1
+    GOOGLE_OAUTH_REDIRECT_URI: https://${SITE_DOMAIN}/admin/auth/oauth/google/callback
+    FACEBOOK_OAUTH_REDIRECT_URI: https://${SITE_DOMAIN}/admin/auth/oauth/facebook/callback
+    APPLE_WEB_REDIRECT_URI: https://${SITE_DOMAIN}/auth/apple/callback
+    GIT_SHA: ${BACKEND_SOURCE_SHA:-unknown}
+  volumes:
+    - backend-secrets:/run/secrets:ro
+  tmpfs: ["/tmp"]
+  networks: [back]
+  depends_on:
+    vault-agent-backend: {condition: service_healthy}
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+
+services:
+  # ---------------------------------------------------------------- secrets (Vault Agent sidecars)
+  vault-agent-backend:
+    <<: *agent
+    user: "10001:10001"
+    command: ["agent", "-config=/vault/agent/backend.hcl"]
+    environment: {GLOWDERMA_ENV: "${GLOWDERMA_ENV}"}
+    volumes:
+      - ../vault/agent:/vault/agent:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/tls/ca.crt:/vault/tls/ca.crt:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/approle/backend:/vault/approle:ro
+      - backend-secrets:/run/secrets
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/secrets/django.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 120s
+
+  vault-agent-frontend:
+    <<: *agent
+    user: "1000:1000"
+    command: ["agent", "-config=/vault/agent/frontend.hcl"]
+    environment: {GLOWDERMA_ENV: "${GLOWDERMA_ENV}"}
+    volumes:
+      - ../vault/agent:/vault/agent:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/tls/ca.crt:/vault/tls/ca.crt:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/approle/frontend:/vault/approle:ro
+      - frontend-secrets:/run/secrets
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/secrets/frontend.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 120s
+
+  vault-agent-datastores:
+    <<: *agent
+    user: "999:999"
+    command: ["agent", "-config=/vault/agent/datastores.hcl"]
+    environment: {GLOWDERMA_ENV: "${GLOWDERMA_ENV}"}
+    volumes:
+      - ../vault/agent:/vault/agent:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/tls/ca.crt:/vault/tls/ca.crt:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/approle/datastores:/vault/approle:ro
+      - datastores-secrets:/run/secrets
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/secrets/postgres_superuser_password && test -s /run/secrets/postgres_app_password && test -s /run/secrets/redis.conf && test -s /run/secrets/redis_password"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 120s
+
+  # ---------------------------------------------------------------- data
+  postgres:
+    <<: *hardened
+    image: postgres:18.6-trixie@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81
+    user: "999:999"
+    # Waits for the agent's files (after a reboot Vault may still be sealed), then runs the official entrypoint.
+    command: ["sh", "-c", "until [ -s /run/secrets/postgres_superuser_password ] && [ -s /run/secrets/postgres_app_password ]; do echo 'waiting for Vault secrets'; sleep 3; done; exec docker-entrypoint.sh postgres"]
+    environment:
+      # Superuser: administration only (psql, pg_dump). Django connects as glowderma_app.
+      POSTGRES_USER: glowderma
+      POSTGRES_DB: glowderma
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+      POSTGRES_APP_PASSWORD_FILE: /run/secrets/postgres_app_password
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ../postgres/initdb:/docker-entrypoint-initdb.d:ro
+      - datastores-secrets:/run/secrets:ro
+    tmpfs:
+      - /var/run/postgresql:uid=999,gid=999,mode=3775
+      - /tmp
+    shm_size: 256mb
+    networks: [back]
+    oom_score_adj: -500
+    stop_grace_period: 60s
+    depends_on:
+      vault-agent-datastores: {condition: service_healthy}
+    healthcheck:
+      # Over TCP: while initdb runs, the temporary server listens on the socket only.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "glowderma", "-d", "glowderma"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  redis:
+    <<: *hardened
+    image: redis:8.10.3-alpine3.23@sha256:21090af93f8324db2f0f0f4f38a7c60369d47d917e000c3423d89d2ae2883537
+    user: "999:1000"
+    # AOF persistence: queued Celery tasks survive a restart. noeviction (default): DB 1 is the broker, so
+    # above maxmemory Redis refuses writes instead of silently dropping tasks. The password comes from the
+    # agent-rendered config file, never from the environment or the command line.
+    command:
+      - sh
+      - -c
+      - >-
+        until [ -s /run/secrets/redis.conf ]; do echo 'waiting for Vault secrets'; sleep 3; done;
+        exec redis-server /run/secrets/redis.conf --dir /data --appendonly yes --appendfsync everysec
+        --maxmemory "$${REDIS_MAXMEMORY}"
+    environment:
+      REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-256mb}
+    volumes:
+      - redisdata:/data
+      - datastores-secrets:/run/secrets:ro
+    networks: [back]
+    oom_score_adj: -500
+    depends_on:
+      vault-agent-datastores: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  # ---------------------------------------------------------------- backend
+  # One-shot: the ONLY process that migrates. Never started by `up` (profile "tools"): scripts/deploy.sh runs it
+  # with `run --rm` after stopping the writers and before starting the new release.
+  backend-migrate:
+    <<: *backend
+    profiles: ["tools"]
+    command: ["migrate"]
+    restart: "no"
+    mem_limit: 512m
+
+  backend-api:
+    <<: *backend
+    command: ["api"]
+    networks:
+      back: {}
+      front: {ipv4_address: 172.30.0.30}
+    volumes:
+      - backend-secrets:/run/secrets:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media:/app/media
+    depends_on:
+      vault-agent-backend: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    mem_limit: ${API_MEM_LIMIT:-1g}
+    pids_limit: 256
+    stop_grace_period: 40s  # gunicorn graceful_timeout is 30 s
+
+  backend-worker:
+    <<: *backend
+    command: ["worker"]
+    networks: [back, egress]
+    volumes:
+      - backend-secrets:/run/secrets:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media:/app/media
+    depends_on:
+      vault-agent-backend: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    mem_limit: ${WORKER_MEM_LIMIT:-1g}
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$$HOSTNAME --timeout 10"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 60s  # warm shutdown; a task still running after this is redelivered (acks late)
+
+  # Exactly one beat: two would enqueue every periodic task twice. Never scale this service.
+  backend-beat:
+    <<: *backend
+    command: ["beat"]
+    depends_on:
+      vault-agent-backend: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    mem_limit: 256m
+    pids_limit: 64
+    healthcheck: {disable: true}
+
+  # ---------------------------------------------------------------- frontend
+  frontend:
+    <<: *hardened
+    image: ${FRONTEND_IMAGE:?}:${FRONTEND_TAG:?}@${FRONTEND_DIGEST:?frontend image not published yet}
+    user: "1000:1000"
+    env_file: ../environments/${GLOWDERMA_ENV}/frontend.env
+    environment:
+      FRONTEND_SECRETS_FILE: /run/secrets/frontend.json
+      GLOWDERMA_API_URL: http://172.30.0.30:8000
+    volumes:
+      - frontend-secrets:/run/secrets:ro
+    tmpfs:
+      - /tmp
+      # Next writes its image-optimizer and data caches here at runtime.
+      - /app/.next/cache:uid=1000,gid=1000,mode=0700
+    networks:
+      front: {ipv4_address: 172.30.0.20}
+    depends_on:
+      vault-agent-frontend: {condition: service_healthy}
+      backend-api: {condition: service_healthy}
+    mem_limit: ${FRONTEND_MEM_LIMIT:-768m}
+    pids_limit: 256
+
+  # ---------------------------------------------------------------- edge
+  edge:
+    <<: *hardened
+    image: caddy:2.11.8-alpine@sha256:3db3a09e418f86a8fce8de4bc0026fccd2b4cd925aef00cc7d843d9fdc75e442
+    user: "1000:1000"
+    # Lets the unprivileged user bind 80/443 (applies to IPv4 and IPv6) without any capability.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    # The only published ports of the whole stack. Docker publishes them on IPv4 and IPv6; HTTP/3 is on by
+    # default in Caddy and needs 443/udp.
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:?}
+      SITE_DOMAIN: ${SITE_DOMAIN}
+      OPS_DOMAIN: ${OPS_DOMAIN}
+      OPS_ALLOWED_IPS: ${OPS_ALLOWED_IPS:-127.0.0.1/32}
+      API_UPSTREAM: 172.30.0.30:8000
+      FRONTEND_UPSTREAM: 172.30.0.20:3000
+    volumes:
+      - ../caddy:/etc/caddy:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/caddy/data:/data
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/caddy/config:/config
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media:/srv/media:ro
+    tmpfs: ["/tmp"]
+    networks:
+      front: {ipv4_address: 172.30.0.10, ipv6_address: "fd00:6764:0:1::10"}
+    depends_on:
+      frontend: {condition: service_started}
+      backend-api: {condition: service_healthy}
+    mem_limit: 256m
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+networks:
+  # Internet-facing: the edge, the Next server and the API. Dual-stack so IPv6 clients reach the edge with their
+  # real address. Dynamic addresses come from the upper half; the fixed ones (.10 .20 .30) can never be taken.
+  front:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25
+        - subnet: "fd00:6764:0:1::/64"
+  # Databases: no route out, unreachable from the edge and the Next server.
+  back:
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.1.0/24}]
+  # Outbound HTTPS for the Celery worker (payment, SMS, delivery providers).
+  egress:
+    ipam:
+      config: [{subnet: 172.30.2.0/24}]
+  # Created by compose/vault.yaml (Vault has its own lifecycle).
+  vault:
+    external: true
+    name: glowderma-${GLOWDERMA_ENV}-vault
+
+volumes:
+  pgdata:
+  redisdata:
+  # Secrets live only in memory. Each volume belongs to the UID of its agent and its consumer.
+  backend-secrets:
+    driver_opts: {type: tmpfs, device: tmpfs, o: "uid=10001,gid=10001,mode=0700,size=1m"}
+  frontend-secrets:
+    driver_opts: {type: tmpfs, device: tmpfs, o: "uid=1000,gid=1000,mode=0700,size=1m"}
+  datastores-secrets:
+    driver_opts: {type: tmpfs, device: tmpfs, o: "uid=999,gid=999,mode=0700,size=1m"}

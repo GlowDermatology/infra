@@ -1,0 +1,1 @@
+{{- with secret (printf "secret/data/%s/django" (env "GLOWDERMA_ENV")) }}{{ with index .Data.data "FCM_CREDENTIALS_JSON_B64" }}{{ . | base64Decode }}{{ end }}{{ end -}}

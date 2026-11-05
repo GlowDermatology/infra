@@ -1,0 +1,69 @@
+# Weekly: scan the images that staging and production RUN right now, with a fresh vulnerability database.
+# New fixable HIGH/CRITICAL findings open (or update) one GitHub issue; the fix is a new build of the app.
+name: Rescan deployed images
+
+on:
+  schedule:
+    - cron: "17 2 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  rescan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: scan
+        run: |
+          set -uo pipefail
+          failing=""
+          for env in staging production; do
+            for app in backend frontend; do
+              upper="$(echo "$app" | tr '[:lower:]' '[:upper:]')"
+              file="environments/$env/$app/image.env"
+              digest="$(sed -n "s/^${upper}_DIGEST=//p" "$file")"
+              [ -n "$digest" ] || continue
+              ref="$(sed -n "s/^${upper}_IMAGE=//p" "$file")@$digest"
+              if ! scripts/ci/scan-image.sh "$ref" "sarif/$env-$app.sarif" enforce; then
+                failing="$failing $env/$app($(sed -n "s/^${upper}_TAG=//p" "$file"))"
+              fi
+            done
+          done
+          echo "failing=$failing" >> "$GITHUB_OUTPUT"
+      - if: always() && hashFiles('sarif/staging-backend.sarif') != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with: {sarif_file: sarif/staging-backend.sarif, category: deployed-staging-backend}
+      - if: always() && hashFiles('sarif/staging-frontend.sarif') != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with: {sarif_file: sarif/staging-frontend.sarif, category: deployed-staging-frontend}
+      - if: always() && hashFiles('sarif/production-backend.sarif') != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with: {sarif_file: sarif/production-backend.sarif, category: deployed-production-backend}
+      - if: always() && hashFiles('sarif/production-frontend.sarif') != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with: {sarif_file: sarif/production-frontend.sarif, category: deployed-production-frontend}
+      - name: Open or update the tracking issue
+        if: steps.scan.outputs.failing != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILING: ${{ steps.scan.outputs.failing }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Deployed images have fixable HIGH/CRITICAL vulnerabilities"
+          body="Images:$FAILING"$'\n\n'"Details: $RUN_URL (and the Security tab). Fix: rebuild the app (a new commit or a re-run of its pipeline on main), then promote."
+          number="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then gh issue comment "$number" --body "$body"; else gh issue create --title "$title" --body "$body"; fi
