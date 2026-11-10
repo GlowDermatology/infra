@@ -30,8 +30,8 @@
 
 ## Changing the domain
 
-Edit `SITE_DOMAIN` / `OPS_DOMAIN` in `environments/<env>/stack.env` and the frontend repo's repository variables
-`<ENV>_NEXT_PUBLIC_SITE_URL`, `<ENV>_GLOWDERMA_ALLOWED_ORIGINS`, `<ENV>_GLOWDERMA_MEDIA_HOSTS`; update DNS; re-run the
+Edit `SITE_DOMAIN` / `OPS_DOMAIN` in `environments/<env>/stack.env` and the variables of the frontend repo's
+`<env>` environment `NEXT_PUBLIC_SITE_URL`, `GLOWDERMA_ALLOWED_ORIGINS`, `GLOWDERMA_MEDIA_HOSTS`; update DNS; re-run the
 frontend pipeline (the domain is baked into the Next.js build) and deploy. Register the new OAuth callback URLs
 with Google/Facebook/Apple (`https://<SITE_DOMAIN>/admin/auth/oauth/<provider>/callback`).
 

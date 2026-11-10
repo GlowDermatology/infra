@@ -8,7 +8,7 @@
 | Infrastructure credentials | Vault (same server) | database and Redis passwords |
 | Public settings | `environments/<env>/*.env` (this repo) | worker counts, provider modes, domain |
 | Private, not secret | `/opt/glowderma/runtime/local.env` on the server | office IP allow-list, backup remote |
-| Build-time frontend values | frontend repo variables `STAGING_*` / `PRODUCTION_*` | `PRODUCTION_NEXT_PUBLIC_SITE_URL` |
+| Build-time frontend values | frontend repo environment variables (`staging` / `production`) | `NEXT_PUBLIC_SITE_URL` |
 | Deploy access | infra repo GitHub environment secrets | `VPS_SSH_KEY` |
 
 GitHub never holds an application secret, a Vault token or an unseal key. A GitHub runner can deploy an image

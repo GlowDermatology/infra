@@ -96,21 +96,25 @@ The SSH session takes a lock (`runtime/deploy.lock`): two deploys never overlap.
 | Repository secret | `INFRA_APP_PRIVATE_KEY` | same private key |
 | Code security | CodeQL **default setup off** | the pipeline runs CodeQL itself (advanced setup) |
 
-Frontend only: **repository variables** (Settings → Secrets and variables → Actions → Variables), because
-Next.js bakes these into the build. The pipeline builds one image per environment from the same commit.
+Frontend only: **GitHub environments** `staging` and `production` (Settings → Environments), each with the same
+**environment variables**, because Next.js bakes these into the build. The pipeline builds one image per
+environment from the same commit, and each matrix row reads only its own environment, so a value missing in one
+environment fails the main build. Not repository variables: the build job would not see them.
 
-| Variable | Example |
-|---|---|
-| `STAGING_NEXT_PUBLIC_SITE_URL` | `https://staging.glowderma.uz` |
-| `STAGING_GLOWDERMA_ALLOWED_ORIGINS` | `staging.glowderma.uz` |
-| `STAGING_GLOWDERMA_MEDIA_HOSTS` | `staging.glowderma.uz/media` (host + path prefix: same origin) |
-| `STAGING_GLOWDERMA_MEDIA_ALLOW_LOCAL` | empty |
-| `PRODUCTION_NEXT_PUBLIC_SITE_URL` | `https://glowderma.uz` |
-| `PRODUCTION_GLOWDERMA_ALLOWED_ORIGINS` | `glowderma.uz` |
-| `PRODUCTION_GLOWDERMA_MEDIA_HOSTS` | `glowderma.uz/media` |
-| `PRODUCTION_GLOWDERMA_MEDIA_ALLOW_LOCAL` | empty |
+| Variable | `staging` | `production` |
+|---|---|---|
+| `NEXT_PUBLIC_SITE_URL` (required) | `https://staging.glowderma.uz` | `https://glowderma.uz` |
+| `GLOWDERMA_ALLOWED_ORIGINS` (required) | `staging.glowderma.uz` | `glowderma.uz` |
+| `GLOWDERMA_MEDIA_HOSTS` (required) | `staging.glowderma.uz/media` | `glowderma.uz/media` |
+| `GLOWDERMA_MEDIA_ALLOW_LOCAL` | unset | unset |
 
-They must agree with `SITE_DOMAIN` in this repository's `environments/<env>/stack.env`.
+`GLOWDERMA_MEDIA_HOSTS` carries the `/media` prefix (same origin): the image optimiser then fetches only
+`/media/**`. `GLOWDERMA_MEDIA_ALLOW_LOCAL=true` lifts the optimiser's private-IP guard and is for local
+development only. The values must agree with `SITE_DOMAIN` in this repository's `environments/<env>/stack.env`.
+
+Environment settings: no required reviewers (production is gated by this repository's Promote workflow; a
+reviewer here would hold every production *build*). Deployment branches: `main` only is safe, pull requests
+build with placeholders and attach no environment. The `staging` environment also hosts the `deploy` job.
 
 ### GitOps GitHub App
 
