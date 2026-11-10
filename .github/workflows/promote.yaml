@@ -98,17 +98,25 @@ jobs:
           git diff
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "summary=$summary" >> "$GITHUB_OUTPUT"
+      # Short-lived (1 h, revoked when the job ends) installation token scoped to this repo's contents.
+      # A push made with it starts "Deploy production", which a GITHUB_TOKEN push would not.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: infra-token
+        if: steps.write.outputs.changed == 'true'
+        with:
+          client-id: ${{ vars.INFRA_APP_CLIENT_ID }}
+          private-key: ${{ secrets.INFRA_APP_PRIVATE_KEY }}
+          permission-contents: write
       - name: Commit to main (starts "Deploy production", which waits for approval)
         if: steps.write.outputs.changed == 'true'
         env:
-          TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
+          TOKEN: ${{ steps.infra-token.outputs.token }}
           SUMMARY: ${{ steps.write.outputs.summary }}
           POLICY: ${{ inputs.scan_policy }}
           ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          [ -n "$TOKEN" ] || { echo "::error::secret INFRA_REPO_TOKEN is missing (a push with GITHUB_TOKEN would not start the deploy)"; exit 1; }
           suffix=""; [ "$POLICY" = report ] && suffix=" [scan-policy:report]"
           git config user.name "glowderma-gitops"
           git config user.email "gitops@users.noreply.github.com"

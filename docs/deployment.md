@@ -85,13 +85,15 @@ The SSH session takes a lock (`runtime/deploy.lock`): two deploys never overlap.
 | | variable `VPS_BOOTSTRAP_USER` | `root` (or a passwordless-sudo user) |
 | Environment `production` | the same five, for the production server | |
 | | protection: **required reviewers**, deployment branches: `main` only | |
-| Repository secret | `INFRA_REPO_TOKEN` | fine-grained token, below |
+| Repository variable | `INFRA_APP_CLIENT_ID` | Client ID of the GitOps GitHub App, below |
+| Repository secret | `INFRA_APP_PRIVATE_KEY` | the App's private key (whole `.pem` file) |
 
 ### Repositories `backend` and `frontend`
 
 | Where | Name | Value |
 |---|---|---|
-| Repository secret | `INFRA_REPO_TOKEN` | same token |
+| Repository variable | `INFRA_APP_CLIENT_ID` | same Client ID |
+| Repository secret | `INFRA_APP_PRIVATE_KEY` | same private key |
 | Code security | CodeQL **default setup off** | the pipeline runs CodeQL itself (advanced setup) |
 
 Frontend only: **repository variables** (Settings → Secrets and variables → Actions → Variables), because
@@ -110,13 +112,27 @@ Next.js bakes these into the build. The pipeline builds one image per environmen
 
 They must agree with `SITE_DOMAIN` in this repository's `environments/<env>/stack.env`.
 
-### `INFRA_REPO_TOKEN`
+### GitOps GitHub App
 
-A **fine-grained personal access token** limited to the `GlowDermatology/infra` repository, with the single
-permission *Contents: Read and write*. Needed because a push made with the workflow's own `GITHUB_TOKEN`
-never starts another workflow. Set an expiry (GitHub requires one) and a calendar reminder; when it expires,
-staging stops updating and promotions fail with a clear error. Rotate: create a new token, update the secret in
-all three repositories, delete the old token. A GitHub App with *Contents: write* on infra is the upgrade path.
+The app pipelines (staging `image.env`) and this repository's Promote workflow (production `image.env`) push
+to `infra` with a GitHub App installation token minted per run by `actions/create-github-app-token`: it lives
+one hour, is revoked when the job ends, is limited to
+*Contents: write* on `infra`, and belongs to no person. A push made with it starts the deploy workflow (a
+push with the workflow's own `GITHUB_TOKEN` never would).
+
+One-time setup, as an organization owner:
+
+1. Organization settings → Developer settings → GitHub Apps → **New GitHub App**. Name e.g.
+   `glowderma-gitops`; any homepage URL; **Webhook: inactive**; repository permission **Contents: Read and
+   write** and nothing else; install target **Only on this account**.
+2. On the App's page: copy the **Client ID**, then **Generate a private key** (downloads a `.pem`).
+3. **Install App** → `GlowDermatology` → **Only select repositories** → `infra`.
+4. In `backend`, `frontend` and `infra`: variable `INFRA_APP_CLIENT_ID`, secret `INFRA_APP_PRIVATE_KEY` (paste the
+   whole `.pem`, including the BEGIN/END lines). Delete the downloaded file.
+5. If `main` in `infra` is protected by a ruleset, add the App to its bypass list.
+
+Rotate the key: generate a new one on the App's page, update the secret in all three repositories, delete the old
+key. The key does not expire.
 
 ### GHCR packages
 

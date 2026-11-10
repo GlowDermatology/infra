@@ -67,6 +67,7 @@ fail2ban. Note: Docker programs its own firewall rules for published ports; only
 ## Accepted risks (documented, not fixed)
 
 - `deploy` in the `docker` group is root-equivalent on its server.
-- `INFRA_REPO_TOKEN` is a user-bound token with an expiry (upgrade path: a GitHub App).
+- The GitOps App private key does not expire and is stored as a secret in three repositories; the tokens
+  minted from it live one hour and can only write contents of `infra`.
 - `/api/revalidate` (Next) is reachable from the internet; it is protected by a bearer secret.
 - The ops console CSP needs `'unsafe-eval'` (Alpine.js in django-unfold).
