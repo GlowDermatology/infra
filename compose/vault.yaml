@@ -13,6 +13,10 @@ services:
     image: hashicorp/vault:2.2.1@sha256:962a92876e168d68eaaa24b0b8b49bbce1cb63024060a67bba95cd158a366fc2
     # The image's own vault user. As root the entrypoint would need setcap/su-exec capabilities.
     user: "100:1000"
+    # Bypass the image's docker-entrypoint.sh: for `server` it appends its own -config=/vault/config (the
+    # directory holding this same vault.hcl), so the listener is declared twice and Vault dies with
+    # "listen tcp4 0.0.0.0:8200: bind: address already in use". Run the binary with exactly this config.
+    entrypoint: ["vault"]
     command: ["server", "-config=/vault/config/vault.hcl"]
     read_only: true
     cap_drop: [ALL]
@@ -23,8 +27,6 @@ services:
       VAULT_CACERT: /vault/tls/ca.crt
       # Keeps `vault` CLI calls inside the container from writing ~/.vault-token (read-only rootfs).
       VAULT_DISABLE_REDIRECTS: "true"
-      SKIP_SETCAP: "true"
-      SKIP_CHOWN: "true"
     volumes:
       - ../vault/config:/vault/config:ro
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/tls:/vault/tls:ro
