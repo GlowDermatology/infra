@@ -1,5 +1,7 @@
 # Vault server (compose/vault.yaml). One single-node Raft cluster per environment/server.
-ui            = false
+# Web UI on, but reachable only through an SSH tunnel: no published port, internal network, not behind Caddy.
+#   ssh -N -L 8200:172.30.3.10:8200 root@<server>   then   https://localhost:8200/ui
+ui            = true
 disable_mlock = true # recommended with integrated storage; the container has no IPC_LOCK capability
 
 storage "raft" {
