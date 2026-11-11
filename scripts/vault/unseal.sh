@@ -7,8 +7,9 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 use_env "${1:-}"
 vault_compose up -d --no-recreate --wait --wait-timeout 120 vault
-while vault_cli status -format=json 2>/dev/null | grep -q '"sealed": true'; do
+while vault_status_json | grep -q '"sealed": true'; do
 	# Interactive: Vault itself prompts with hidden input, so the share never appears on a command line.
 	vault_compose exec vault vault operator unseal
 done
+vault_status_json | grep -q '"sealed": false' || die "Vault ($ENV) does not answer: docker logs glowderma-$ENV-vault-vault-1"
 log "Vault ($ENV) is unsealed"

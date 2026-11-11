@@ -9,7 +9,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 use_env "${1:-}"
 [ -s "$RUNTIME_DIR/vault/tls/vault.key" ] || die "no TLS material: run scripts/vault/gen-tls.sh $ENV (as root) first"
 vault_compose up -d --no-recreate --wait --wait-timeout 120 vault
-if vault_cli status -format=json 2>/dev/null | grep -q '"initialized": true'; then
+if vault_status_json | grep -q '"initialized": true'; then
 	die "this Vault is already initialised. Never initialise twice (it would mean starting from empty storage)."
 fi
 read -r -p "Initialise the $ENV Vault now? Type '$ENV' to continue: " answer

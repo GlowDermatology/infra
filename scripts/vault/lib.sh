@@ -19,6 +19,10 @@ vault_cli() {
 	fi
 }
 
+# vault_status_json: `vault status -format=json`, whatever its exit code. Status exits 2 when Vault is SEALED,
+# so piping it straight into grep under `set -o pipefail` reads every sealed Vault as "no match".
+vault_status_json() { vault_cli status -format=json 2>/dev/null || true; }
+
 # ask_token: prompts for an admin token (the root token right after init, later a token you create for the
 # task). Never stored anywhere.
 ask_token() {
