@@ -72,6 +72,32 @@ Pull requests run the security stages, the tests and a build without push.
 
 The SSH session takes a lock (`runtime/deploy.lock`): two deploys never overlap.
 
+### The deploy gate (what the deploy key can do)
+
+`VPS_SSH_KEY` opens no shell. Bootstrap pins it in `~deploy/.ssh/authorized_keys` with
+`restrict,command="/usr/local/sbin/glowderma-deploy-gate"`, a root-owned copy of
+[scripts/deploy-gate.sh](../scripts/deploy-gate.sh), and removes it from root's `authorized_keys`. Whatever a
+client sends, sshd runs the gate, which accepts one request, `deploy <env> <40-hex commit> <ghcr-user>`, and
+only for a commit already on `origin/main`. A leaked deploy key can therefore only redeploy something on `main`.
+Root access needs `VPS_BOOTSTRAP_SSH_KEY`, which only the Bootstrap workflow uses; you can remove that secret
+between bootstraps and add it back when you need one.
+
+Consequences: deploys run from `main` only (a `workflow_dispatch` from another branch is refused by the gate),
+and a change to the gate takes effect on a server after **Bootstrap server** runs again (it installs the gate
+from `origin/main`).
+
+### Moving an existing server to two keys (once per server)
+
+1. `ssh-keygen -t ed25519 -f glowderma-<env>-deploy -N ''` on your machine.
+2. Environment `<env>` in infra: copy the current `VPS_SSH_KEY` value into a new secret
+   `VPS_BOOTSTRAP_SSH_KEY` (it is the key installed for root), then set `VPS_SSH_KEY` to the new
+   `glowderma-<env>-deploy` private key. Delete both local files.
+3. Actions → **Bootstrap server** → `<env>`. It pins the new key to the gate and drops any old unrestricted entry.
+4. Actions → **Deploy staging** / **Deploy production** → Run workflow (from `main`) and check it goes green.
+
+Until step 3 runs, deploys to that server fail at the SSH step (the old setup runs `deploy ...` as a shell
+command, which does not exist); nothing on the server changes.
+
 ## GitHub settings to create (once)
 
 ### Repository `infra`
@@ -80,10 +106,11 @@ The SSH session takes a lock (`runtime/deploy.lock`): two deploys never overlap.
 |---|---|---|
 | Environment `staging` | secret `VPS_HOST` | staging server IP or hostname |
 | | secret `VPS_USERNAME` | `deploy` |
-| | secret `VPS_SSH_KEY` | private key (ed25519) whose public half the provider installed for root |
+| | secret `VPS_BOOTSTRAP_SSH_KEY` | private key (ed25519) whose public half the provider installed for root; used only by **Bootstrap server** |
+| | secret `VPS_SSH_KEY` | a **different** private key (ed25519): the deploy key, pinned by bootstrap to the deploy gate |
 | | variable `VPS_HOST_KEY` | the server's host key, e.g. `ssh-ed25519 AAAA...` (verified out of band) |
 | | variable `VPS_BOOTSTRAP_USER` | `root` (or a passwordless-sudo user) |
-| Environment `production` | the same five, for the production server | |
+| Environment `production` | the same six, for the production server | |
 | | protection: **required reviewers**, deployment branches: `main` only | |
 | Repository variable | `INFRA_APP_CLIENT_ID` | Client ID of the GitOps GitHub App, below |
 | Repository secret | `INFRA_APP_PRIVATE_KEY` | the App's private key (whole `.pem` file) |
@@ -141,7 +168,20 @@ key. The key does not expire.
 ### GHCR packages
 
 The first push of each package must come from the app's workflow (that gives the repository admin rights on
-the package, which the cleanup job needs). Then, in each package's settings, either make it public or grant
-the `infra` repository read access (the pre-deploy scan and the promote workflow pull with infra's token).
-Servers pull anonymously, so **public** is the simple choice; if the packages stay private, `docker login
-ghcr.io` once on each server as the `deploy` user with a read-only token.
+the package, which the cleanup job needs). Then, in each package's settings (**Manage Actions access**), grant
+the `infra` repository **Read**: the pre-deploy scan, the promote workflow and the deploy itself all pull with
+infra's `GITHUB_TOKEN`. The packages stay **private**.
+
+Servers hold **no registry credential**. The deploy job passes its own `GITHUB_TOKEN` (`packages: read`) to the
+server over the SSH session's stdin; the server logs in to `ghcr.io` with it into a throwaway `DOCKER_CONFIG`
+directory, pulls, and deletes that directory when the deploy ends. The token itself expires when the job ends.
+GHCR accepts only classic PATs and `GITHUB_TOKEN` (no fine-grained PATs, no GitHub App tokens), and a
+long-lived classic PAT on a server is exactly what this avoids.
+
+Consequences:
+
+- Run deploys through the workflows (`workflow_dispatch` re-runs one). Running `scripts/deploy.sh` by hand on
+  the server (as root, `su deploy -c ...`) only works when every image is already pulled; `--restart` is fine,
+  it pulls nothing.
+- A server that was set up with a stored login should drop it: `docker logout ghcr.io` as the `deploy` user,
+  then check that `~/.docker/config.json` has no `ghcr.io` entry. Revoke that PAT on GitHub.

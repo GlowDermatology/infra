@@ -7,8 +7,13 @@ About 30 minutes. Do staging first. Every command after step 2 runs **on the ser
 
 - An Ubuntu 24.04 or 26.04 VPS (2 vCPU / 4 GB / 40 GB is enough) in Uzbekistan (compliance), with IPv4 and,
   ideally, IPv6. The provider installs your SSH public key for `root`.
-- A dedicated ed25519 key pair for GitHub: `ssh-keygen -t ed25519 -f glowderma-<env> -N ''`. Give the provider
-  `glowderma-<env>.pub`; the private file becomes the `VPS_SSH_KEY` secret.
+- Two dedicated ed25519 key pairs for GitHub:
+  - `ssh-keygen -t ed25519 -f glowderma-<env>-bootstrap -N ''`: give the provider `glowderma-<env>-bootstrap.pub`
+    (installed for root); the private file becomes the `VPS_BOOTSTRAP_SSH_KEY` secret.
+  - `ssh-keygen -t ed25519 -f glowderma-<env>-deploy -N ''`: the private file becomes the `VPS_SSH_KEY` secret.
+    Bootstrap installs it for `deploy`, pinned to the deploy gate (it can only deploy commits on `main`).
+
+  Delete the private files once they are in GitHub. Your own login key for root is separate again.
 - The server's host key, read **out of band**: the provider console shows it, or run
   `ssh-keyscan -t ed25519 <ip>` from your machine and compare with the console.
 - DNS access for the domains in `environments/<env>/stack.env` (`SITE_DOMAIN`, `www.SITE_DOMAIN`, `OPS_DOMAIN`).
@@ -16,7 +21,8 @@ About 30 minutes. Do staging first. Every command after step 2 runs **on the ser
 
 ## 1. GitHub
 
-In the infra repository, environment `<env>`: secrets `VPS_HOST`, `VPS_USERNAME=deploy`, `VPS_SSH_KEY`;
+In the infra repository, environment `<env>`: secrets `VPS_HOST`, `VPS_USERNAME=deploy`, `VPS_SSH_KEY`,
+`VPS_BOOTSTRAP_SSH_KEY`;
 variables `VPS_HOST_KEY` (the host key, e.g. `ssh-ed25519 AAAA...`) and `VPS_BOOTSTRAP_USER=root`.
 
 ## 2. Bootstrap

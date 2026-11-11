@@ -4,8 +4,9 @@
 # ssh-keyscan -t ed25519 <host> from your own machine, compared with the console). It is never trusted on first
 # use. After the run, store the same value as the environment variable VPS_HOST_KEY for the deploy workflows.
 #
-# The provider must have installed the public half of VPS_SSH_KEY for VPS_BOOTSTRAP_USER (root, or a user
-# with passwordless sudo). Production requires an approval like any production job.
+# Two key pairs: VPS_BOOTSTRAP_SSH_KEY logs in as VPS_BOOTSTRAP_USER (root, or a user with passwordless sudo;
+# the provider installs its public half), and VPS_SSH_KEY becomes the deploy user's key, pinned to the deploy
+# gate (scripts/deploy-gate.sh). Production requires an approval like any production job.
 name: Bootstrap server
 
 on:
@@ -35,7 +36,8 @@ jobs:
           persist-credentials: false
       - name: Run scripts/bootstrap-server.sh over SSH
         env:
-          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          BOOTSTRAP_KEY: ${{ secrets.VPS_BOOTSTRAP_SSH_KEY }}
+          DEPLOY_KEY: ${{ secrets.VPS_SSH_KEY }}
           HOST: ${{ secrets.VPS_HOST }}
           HOST_KEY: ${{ inputs.host_key }}
           BOOT_USER: ${{ vars.VPS_BOOTSTRAP_USER }}
@@ -44,13 +46,20 @@ jobs:
           set -euo pipefail
           [[ "$HOST_KEY" =~ ^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa)\ [A-Za-z0-9+/=]+$ ]] ||
             { echo "::error::host_key must look like 'ssh-ed25519 AAAA...'"; exit 1; }
+          [ -n "$BOOTSTRAP_KEY" ] && [ -n "$DEPLOY_KEY" ] ||
+            { echo "::error::environment secrets VPS_BOOTSTRAP_SSH_KEY and VPS_SSH_KEY are both required (docs/deployment.md)"; exit 1; }
           install -d -m 0700 ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy && chmod 0600 ~/.ssh/id_deploy
+          trap 'rm -f ~/.ssh/id_bootstrap ~/.ssh/id_deploy' EXIT
+          printf '%s\n' "$BOOTSTRAP_KEY" > ~/.ssh/id_bootstrap && chmod 0600 ~/.ssh/id_bootstrap
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_deploy && chmod 0600 ~/.ssh/id_deploy
           printf '%s %s\n' "$HOST" "$HOST_KEY" > ~/.ssh/known_hosts
-          pub="$(ssh-keygen -y -f ~/.ssh/id_deploy)"
+          boot_pub="$(ssh-keygen -y -f ~/.ssh/id_bootstrap | cut -d' ' -f1-2)"
+          pub="$(ssh-keygen -y -f ~/.ssh/id_deploy | cut -d' ' -f1-2)"
+          # The deploy key gets pinned to the deploy gate and removed from root: it cannot also be the login key.
+          [ "$boot_pub" != "$pub" ] ||
+            { echo "::error::VPS_BOOTSTRAP_SSH_KEY and VPS_SSH_KEY must be different key pairs (docs/deployment.md)"; exit 1; }
           user="${BOOT_USER:-root}"
           sudo=""; [ "$user" = root ] || sudo="sudo -n"
-          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes -o BatchMode=yes "$user@$HOST" \
+          ssh -i ~/.ssh/id_bootstrap -o StrictHostKeyChecking=yes -o BatchMode=yes "$user@$HOST" \
             "$sudo env DEPLOY_PUBLIC_KEY='$pub' bash -s -- $TARGET" < scripts/bootstrap-server.sh
-          rm -f ~/.ssh/id_deploy
           echo "::notice::Bootstrapped. Set variable VPS_HOST_KEY of environment '$TARGET' to the host key you entered, then follow docs/first-server-runbook.md."

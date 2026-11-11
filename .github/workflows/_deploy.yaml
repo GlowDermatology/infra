@@ -1,6 +1,8 @@
 # Reusable deploy of one environment, called by deploy-staging.yaml and deploy-production.yaml.
 #   1. full image scan of BOTH digests named in environments/<env>/*/image.env, with a fresh vulnerability DB
-#   2. deploy over SSH: the server checks out exactly this infra commit and runs scripts/deploy.sh
+#   2. deploy over SSH: the server's deploy gate (scripts/deploy-gate.sh, the key's forced command) checks out
+#      exactly this infra commit, if it is on main, and runs scripts/deploy.sh, pulling the private GHCR images
+#      with this job's short-lived GITHUB_TOKEN (the server stores no registry credential)
 # Job 2 runs in the GitHub environment <env> (its secrets VPS_HOST, VPS_USERNAME, VPS_SSH_KEY resolve there, no
 # secret is passed in by the caller); production waits for a required reviewer before anything happens.
 name: Deploy (reusable)
@@ -85,8 +87,11 @@ jobs:
     needs: image-scan
     if: needs.image-scan.outputs.ready == 'true'
     runs-on: ubuntu-24.04
+    # packages: read = this job's GITHUB_TOKEN can pull the private GHCR images. It is handed to the server for
+    # this deploy only and expires when the job ends, so no registry credential is ever stored there.
     permissions:
       contents: read
+      packages: read
     environment:
       name: ${{ inputs.environment }}
     # One deploy per environment at a time; a newer one waits, nothing is ever cancelled half-way.
@@ -114,18 +119,14 @@ jobs:
           USERNAME: ${{ secrets.VPS_USERNAME }}
           TARGET: ${{ inputs.environment }}
           SHA: ${{ github.sha }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes -o BatchMode=yes -o ServerAliveInterval=30 \
-            "${USERNAME:-deploy}@$HOST" bash -s -- "$TARGET" "$SHA" <<'REMOTE'
-          set -euo pipefail
-          env="$1"; sha="$2"
-          exec 9>/opt/glowderma/runtime/deploy.lock
-          flock -w 900 9 || { echo "another deploy holds the lock" >&2; exit 1; }
-          cd /opt/glowderma/infra
-          git fetch --quiet origin
-          git checkout --quiet --force --detach "$sha"
-          exec scripts/deploy.sh "$env"
-          REMOTE
+          # The deploy key is pinned to the server's deploy gate (scripts/deploy-gate.sh): this request line is
+          # all it accepts. The token travels as the only line of stdin, never on a command line.
+          printf '%s\n' "$GHCR_TOKEN" |
+            ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes -o BatchMode=yes -o ServerAliveInterval=30 \
+              "${USERNAME:-deploy}@$HOST" "deploy $TARGET $SHA $GHCR_USER"
       - if: always()
         run: rm -f ~/.ssh/id_deploy

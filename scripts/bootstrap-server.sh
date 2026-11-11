@@ -6,7 +6,9 @@
 #   ssh root@host "DEPLOY_PUBLIC_KEY='ssh-ed25519 AAAA...' bash -s -- staging" < scripts/bootstrap-server.sh
 #
 # Environment:
-#   DEPLOY_PUBLIC_KEY   required: public key of the "deploy" user (the workflows' VPS_SSH_KEY)
+#   DEPLOY_PUBLIC_KEY   required: public key of the "deploy" user (the workflows' VPS_SSH_KEY). It is pinned
+#                       to the deploy gate (scripts/deploy-gate.sh) and removed from root's authorized_keys.
+#                       Log in for this script with a DIFFERENT key (VPS_BOOTSTRAP_SSH_KEY).
 #   INFRA_REPO_URL      default https://github.com/GlowDermatology/infra.git
 #
 # What it does: packages and security updates, Docker Engine + Compose from Docker's repository, dual-stack
@@ -141,9 +143,9 @@ id deploy >/dev/null 2>&1 || useradd --create-home --shell /bin/bash deploy
 usermod -aG docker deploy
 install -d -m 0700 -o deploy -g deploy /home/deploy/.ssh
 touch /home/deploy/.ssh/authorized_keys
-grep -qxF "$DEPLOY_PUBLIC_KEY" /home/deploy/.ssh/authorized_keys || echo "$DEPLOY_PUBLIC_KEY" >>/home/deploy/.ssh/authorized_keys
 chown deploy:deploy /home/deploy/.ssh/authorized_keys
 chmod 0600 /home/deploy/.ssh/authorized_keys
+# The key itself is added after the infra checkout, pinned to the deploy gate (step "Deploy key" below).
 
 step "Directories (owned by the UIDs the containers run as)"
 install -d -m 0755 /etc/glowderma "$BASE"
@@ -174,6 +176,44 @@ if [ ! -d "$BASE/infra/.git" ]; then
 	sudo -u deploy git clone --quiet "$INFRA_REPO_URL" "$BASE/infra"
 else
 	sudo -u deploy git -C "$BASE/infra" fetch --quiet origin
+fi
+
+step "Deploy key: pinned to the deploy gate (no shell)"
+# Root-owned copy of scripts/deploy-gate.sh from origin/main, outside the checkout the deploy user owns.
+gate=/usr/local/sbin/glowderma-deploy-gate
+gate_tmp="$(mktemp)"
+sudo -u deploy git -C "$BASE/infra" show origin/main:scripts/deploy-gate.sh | tee "$gate_tmp" >/dev/null
+install -m 0755 -o root -g root "$gate_tmp" "$gate"
+rm -f "$gate_tmp"
+read -r key_type key_blob _ <<<"$DEPLOY_PUBLIC_KEY"
+[ -n "${key_blob:-}" ] || {
+	echo "DEPLOY_PUBLIC_KEY is not a public key line" >&2
+	exit 1
+}
+# Replace every line carrying this key (an older unrestricted entry included) with the pinned one.
+keys=/home/deploy/.ssh/authorized_keys
+{
+	grep -vF "$key_blob" "$keys" || true
+	echo "restrict,command=\"$gate\" $key_type $key_blob glowderma-deploy"
+} >"$keys.new"
+install -m 0600 -o deploy -g deploy "$keys.new" "$keys"
+rm -f "$keys.new"
+# The deploy key must not open root (or the bootstrap user) either. Removed only when another key remains,
+# so a server set up with a single shared key is never locked out: it gets a warning instead.
+admin_home=/root
+[ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && admin_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+admin_keys="$admin_home/.ssh/authorized_keys"
+if [ -f "$admin_keys" ] && grep -qF "$key_blob" "$admin_keys"; then
+	if grep -vF "$key_blob" "$admin_keys" | grep -qE '^(ssh-|ecdsa-|sk-)'; then
+		grep -vF "$key_blob" "$admin_keys" >"$admin_keys.new" || true
+		chmod --reference="$admin_keys" "$admin_keys.new"
+		chown --reference="$admin_keys" "$admin_keys.new"
+		mv "$admin_keys.new" "$admin_keys"
+		echo "removed the deploy key from $admin_keys"
+	else
+		echo "WARNING: the deploy key is the ONLY key in $admin_keys; left in place so you are not locked out." >&2
+		echo "         Use a separate bootstrap key (docs/deployment.md), re-run, and this is removed." >&2
+	fi
 fi
 
 step "Backups (nightly 02:15 Tashkent) and Vault audit log rotation"

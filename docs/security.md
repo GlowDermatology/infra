@@ -6,12 +6,17 @@
 |---|---|---|
 | App repo workflows | build/push their own image, commit `environments/staging/<app>/image.env` | reach a server, read any secret, write production |
 | Promote workflow | commit `environments/production/*/image.env` (verified digests only) | deploy without a reviewer |
-| Deploy workflows | SSH as `deploy`, run `scripts/deploy.sh` at a given infra commit | read Vault secrets (they are rendered on the server) |
+| Deploy workflows | SSH as `deploy` through the deploy gate: deploy a commit that is on `main` | open a shell, run any other command, deploy an unmerged commit, read Vault secrets (they are rendered on the server) |
+| Bootstrap workflow | SSH as root with `VPS_BOOTSTRAP_SSH_KEY`, run `scripts/bootstrap-server.sh` | run without that separate secret |
 | `deploy` user | Docker (root-equivalent on that host) | anything on the other environment's server |
 | Application containers | read their own rendered secret files | reach Vault's token, AppRole files, the Docker socket |
 
-The `deploy` user is in the `docker` group, which is root-equivalent on that server: protect `VPS_SSH_KEY`
-accordingly (environment secret, production behind reviewers).
+The `deploy` user is in the `docker` group, which is root-equivalent on that server. That is why its SSH key
+(`VPS_SSH_KEY`) is pinned to the deploy gate (`restrict,command=...`, see
+[deployment.md](deployment.md#the-deploy-gate-what-the-deploy-key-can-do)): it opens no shell and can only
+deploy a commit already on `main`. Root access uses a different key, `VPS_BOOTSTRAP_SSH_KEY`, needed only to
+bootstrap; protect it most (environment secret, production behind reviewers, removable between bootstraps).
+No registry credential lives on a server: each deploy brings its job's short-lived `GITHUB_TOKEN`.
 
 ## Container hardening (enforced by `scripts/validate.sh`)
 
