@@ -28,6 +28,9 @@ jobs:
       packages: read
       security-events: write
     uses: ./.github/workflows/_deploy.yaml
+    # Required even for ENVIRONMENT secrets: a reusable workflow sees no secret its caller does not pass,
+    # environment: on its job notwithstanding (variables are not affected). Without it VPS_SSH_KEY is empty.
+    secrets: inherit
     with:
       environment: staging
       scan_policy: ${{ inputs.scan_policy || (contains(github.event.head_commit.message, '[scan-policy:report]') && 'report' || 'enforce') }}

@@ -3,8 +3,8 @@
 #   2. deploy over SSH: the server's deploy gate (scripts/deploy-gate.sh, the key's forced command) checks out
 #      exactly this infra commit, if it is on main, and runs scripts/deploy.sh, pulling the private GHCR images
 #      with this job's short-lived GITHUB_TOKEN (the server stores no registry credential)
-# Job 2 runs in the GitHub environment <env> (its secrets VPS_HOST, VPS_USERNAME, VPS_SSH_KEY resolve there, no
-# secret is passed in by the caller); production waits for a required reviewer before anything happens.
+# Job 2 runs in the GitHub environment <env> (its secrets VPS_HOST, VPS_USERNAME, VPS_SSH_KEY resolve there,
+# which only works because the callers use `secrets: inherit`); production waits for a required reviewer.
 name: Deploy (reusable)
 
 on:
