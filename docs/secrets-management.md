@@ -6,7 +6,8 @@
 |---|---|---|
 | Application secrets | Vault on the environment's own server | `SECRET_KEY`, provider passwords |
 | Infrastructure credentials | Vault (same server) | database and Redis passwords |
-| Public settings | `environments/<env>/*.env` (this repo) | worker counts, provider modes, domain |
+| App settings (overrides of the code defaults) | Vault, in the same path as the app's secrets | worker counts, provider modes, log level |
+| Stack values | `environments/<env>/stack.env` (this repo) | domain, memory limits |
 | Private, not secret | `/opt/glowderma/runtime/local.env` on the server | office IP allow-list, backup remote |
 | Build-time frontend values | frontend repo environment variables (`staging` / `production`) | `NEXT_PUBLIC_SITE_URL` |
 | Deploy access | infra repo GitHub environment secrets | `VPS_SSH_KEY` (deploy gate only), `VPS_BOOTSTRAP_SSH_KEY` (root, bootstrap only) |
@@ -39,6 +40,26 @@ read of the other environment.
 One agent serves all Django processes (api, worker, beat, migrate) because every Django process loads the
 full settings, Celery app included: a separate Celery identity would hold the same secrets.
 
+### App settings live here too (overrides only)
+
+`secret/<env>/django` and `secret/<env>/frontend` hold the apps' secrets **and** their public settings: both
+become environment variables the same way. The rule is overrides only: a key goes in Vault when this
+environment needs a value different from the default in code (`config/settings/*` in the backend,
+`src/lib/env.server.ts` in the frontend); delete it to return to the default. Change keys in the Vault UI, then
+Actions → **Restart** (see below). Keep in mind:
+
+- Provider modes: everything is `fake` until its go-live checklist is done (backend `docs/integrations/*.md`);
+  then set `<PROVIDER>_MODE=live` and the provider's credentials here.
+- `DJANGO_ADMIN_ENABLED=true` (ops console) also needs `OPS_ALLOWED_IPS` in the server's `local.env`.
+- `SECURE_HSTS_PRELOAD=true` is a deliberate, near-irreversible opt-in.
+- A misspelled key is ignored silently, and a malformed value (`GUNICORN_WORKERS=abc`) stops the app at
+  start: check the Restart run goes green.
+- Frontend keys read at build time (`NEXT_PUBLIC_*`, `GLOWDERMA_MEDIA_HOSTS`, `GLOWDERMA_ALLOWED_ORIGINS`) are
+  frontend repo GitHub variables, not Vault. `GLOWDERMA_DATA_SOURCE=api` is set by `compose/app.yaml`.
+
+The env files `environments/<env>/backend.env` and `frontend.env` were moved here once with
+`scripts/vault/import-env.sh <env>` (adds only keys Vault does not have yet).
+
 ### Files the agents render
 
 Memory-only volumes (`tmpfs`) owned by the consumer's UID, mode 0700; files 0400; read-only in the consumer.
@@ -59,7 +80,8 @@ container entrypoint waits for the file to exist before starting Django.
 
 | Change | Command (on the server) |
 |---|---|
-| add/change one Django or Next secret | `scripts/vault/put-secret.sh <env> django <KEY>` (hidden prompt, restarts the consumers) |
+| add/change Django or Next keys in the Vault UI (SSH tunnel, see `vault/config/vault.hcl`) | then GitHub Actions → **Restart** → `<env>` + `backend`/`frontend`/`all` (or `scripts/restart.sh <env> <target>` on the server) |
+| add/change one Django or Next secret | `scripts/vault/put-secret.sh <env> django <KEY>` (hidden prompt, then `restart.sh`) |
 | rotate the database app password | `scripts/vault/rotate-db-password.sh <env>` |
 | rotate the internal API secret | `scripts/vault/rotate-internal-secret.sh <env>` |
 | rotate an agent's AppRole secret_id | `scripts/vault/rotate-approle-secret-id.sh <env> <role>` (root) |

@@ -40,7 +40,7 @@ those repositories only **build, scan and publish images**, then write the new i
 | `caddy/Caddyfile` | edge: TLS, HTTP/3, IPv4+IPv6, routing, log redaction; `edge_probe.py` tests it |
 | `vault/` | server config, agent configs and templates, per-environment policies |
 | `postgres/initdb/` | creates the non-superuser application role |
-| `environments/<env>/` | `stack.env` (domain, limits), `backend.env`, `frontend.env`, `<app>/image.env` |
+| `environments/<env>/` | `stack.env` (domain, limits), `<app>/image.env`. App settings are in Vault, see `docs/secrets-management.md` |
 | `scripts/` | `deploy.sh`, `healthcheck.sh`, `manage.sh`, `backup.sh`, `restore-postgres.sh`, `bootstrap-server.sh` |
 | `scripts/vault/` | TLS, init, unseal, configure, initial secrets, put/rotate secrets |
 | `.github/workflows/` | `validate`, `deploy-staging`, `deploy-production`, `promote`, `bootstrap-server`, `rescan-deployed` |

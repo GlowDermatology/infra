@@ -1,4 +1,5 @@
-# Glow Derma application stack. ONE file for every environment; the values live in environments/<env>/.
+# Glow Derma application stack. ONE file for every environment; stack values live in environments/<env>/,
+# app settings and secrets in Vault (secret/<env>/django, secret/<env>/frontend).
 #
 # Never run this by hand with plain `docker compose`: scripts/deploy.sh builds the exact command
 # (project name glowderma-<env>, the env files, the image pins) and refuses the wrong environment.
@@ -37,7 +38,8 @@ x-backend: &backend
   <<: *hardened
   image: ${BACKEND_IMAGE:?}:${BACKEND_TAG:?}@${BACKEND_DIGEST:?backend image not published yet}
   user: "10001:10001"
-  env_file: ../environments/${GLOWDERMA_ENV}/backend.env
+  # App settings and secrets: every key of secret/<env>/django in Vault, rendered into DJANGO_SECRETS_FILE
+  # (overrides only: an unset key keeps its default in config/settings). Below: topology only.
   environment: &backend-env
     DJANGO_SETTINGS_MODULE: config.settings.production
     # Rendered by vault-agent-backend: every secret, including the DB and Redis credentials.
@@ -251,10 +253,12 @@ services:
     <<: *hardened
     image: ${FRONTEND_IMAGE:?}:${FRONTEND_TAG:?}@${FRONTEND_DIGEST:?frontend image not published yet}
     user: "1000:1000"
-    env_file: ../environments/${GLOWDERMA_ENV}/frontend.env
+    # App settings and secrets: every key of secret/<env>/frontend in Vault, rendered into FRONTEND_SECRETS_FILE.
     environment:
       FRONTEND_SECRETS_FILE: /run/secrets/frontend.json
       GLOWDERMA_API_URL: http://172.30.0.30:8000
+      # Deployed = real data; the code default (mock) is for development only.
+      GLOWDERMA_DATA_SOURCE: api
     volumes:
       - frontend-secrets:/run/secrets:ro
     tmpfs:
