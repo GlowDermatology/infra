@@ -19,10 +19,8 @@ echo
 printf '%s' "$value" | vault_cli kv patch -mount=secret "$ENV/$path" "$key=-" >/dev/null
 unset value
 if [ "$path" = django ]; then
-	restart_agents vault-agent-backend
-	"$INFRA_DIR/scripts/deploy.sh" "$ENV" --restart backend-api backend-worker backend-beat
+	"$INFRA_DIR/scripts/restart.sh" "$ENV" backend
 else
-	restart_agents vault-agent-frontend
-	"$INFRA_DIR/scripts/deploy.sh" "$ENV" --restart frontend
+	"$INFRA_DIR/scripts/restart.sh" "$ENV" frontend
 fi
 log "secret/$ENV/$path $key updated and loaded"

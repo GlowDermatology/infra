@@ -1,0 +1,64 @@
+# Reload an app's settings and secrets from Vault after changing them (Vault UI, `vault kv patch`): Actions →
+# Restart → environment + target. Over SSH the server's deploy gate (scripts/deploy-gate.sh, the key's forced
+# command) runs scripts/restart.sh on the release already deployed: re-render the Vault Agent file, recreate the
+# app, healthcheck. No checkout, no image pull, no registry token.
+# Runs in the GitHub environment <env> (its secrets VPS_HOST, VPS_USERNAME, VPS_SSH_KEY); production waits for a
+# required reviewer, and both environments accept only main, as the deploys do.
+name: Restart
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to restart
+        type: choice
+        options: [staging, production]
+        required: true
+      target:
+        description: What to reload from Vault
+        type: choice
+        options: [backend, frontend, all]
+        default: all
+        required: true
+
+permissions: {}
+
+jobs:
+  restart:
+    name: Restart ${{ inputs.target }} (${{ inputs.environment }})
+    runs-on: ubuntu-24.04
+    permissions: {}
+    environment:
+      name: ${{ inputs.environment }}
+    # Shares the deploy group: a restart and a deploy of the same environment never overlap.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    timeout-minutes: 20
+    steps:
+      - name: SSH key and pinned host key
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          HOST: ${{ secrets.VPS_HOST }}
+          HOST_KEY: ${{ vars.VPS_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$SSH_KEY" ] && [ -n "$HOST" ] && [ -n "$HOST_KEY" ] || {
+            echo "::error::environment secrets VPS_SSH_KEY, VPS_HOST and variable VPS_HOST_KEY are required (docs/deployment.md)"; exit 1; }
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 0600 ~/.ssh/id_deploy
+          printf '%s %s\n' "$HOST" "$HOST_KEY" > ~/.ssh/known_hosts
+      - name: scripts/restart.sh on the server
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USERNAME: ${{ secrets.VPS_USERNAME }}
+          TARGET_ENV: ${{ inputs.environment }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          # The deploy key is pinned to the deploy gate: this request line is all it accepts besides `deploy`.
+          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes -o BatchMode=yes -o ServerAliveInterval=30 \
+            "${USERNAME:-deploy}@$HOST" "restart $TARGET_ENV $TARGET" </dev/null
+      - if: always()
+        run: rm -f ~/.ssh/id_deploy
