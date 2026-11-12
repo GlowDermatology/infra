@@ -29,6 +29,10 @@ x-hardened: &hardened
 x-agent: &agent
   <<: *hardened
   image: hashicorp/vault:2.2.1@sha256:962a92876e168d68eaaa24b0b8b49bbce1cb63024060a67bba95cd158a366fc2
+  # Bypass the image's docker-entrypoint.sh (as for the server in compose/vault.yaml): under the agents' UIDs it
+  # does not prefix `vault`, and every agent died with "exec: agent: not found". Each service's command starts
+  # with the subcommand: ["agent", "-config=..."].
+  entrypoint: ["vault"]
   tmpfs: ["/tmp"]
   networks: [vault]
   mem_limit: 64m
