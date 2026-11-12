@@ -51,7 +51,13 @@ person's password manager entry, and the root token separately. Never paste them
 su deploy -c 'scripts/vault/unseal.sh <env>'                  # 3 of the 5 shares
 scripts/vault/configure.sh <env>                               # as root; asks for the root token
 su deploy -c 'scripts/vault/generate-app-secrets.sh <env>'     # asks for the root token
+su deploy -c 'scripts/vault/import-env.sh <env>'               # asks for the root token
 ```
+
+`import-env.sh` puts this environment's app settings (worker counts, provider modes, HSTS, ...) into Vault next
+to the secrets, from the former `environments/<env>/backend.env` / `frontend.env` in git history. Without it
+the apps run on the code defaults. Later changes: Vault UI, then Actions → **Restart**
+([secrets-management.md](secrets-management.md)).
 
 When done, revoke the root token (it can always be regenerated from the unseal keys with
 `vault operator generate-root`, so nobody keeps a standing admin credential):
