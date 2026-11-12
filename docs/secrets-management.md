@@ -50,7 +50,8 @@ Actions → **Restart** (see below). Keep in mind:
 
 - Provider modes: everything is `fake` until its go-live checklist is done (backend `docs/integrations/*.md`);
   then set `<PROVIDER>_MODE=live` and the provider's credentials here.
-- `DJANGO_ADMIN_ENABLED=true` (ops console) also needs `OPS_ALLOWED_IPS` in the server's `local.env`.
+- `DJANGO_ADMIN_ENABLED=true` (ops console) also needs `OPS_ALLOWED_IPS` in the server's `local.env`: see
+  [ops-console-access.md](ops-console-access.md).
 - `SECURE_HSTS_PRELOAD=true` is a deliberate, near-irreversible opt-in.
 - A misspelled key is ignored silently, and a malformed value (`GUNICORN_WORKERS=abc`) stops the app at
   start: check the Restart run goes green.

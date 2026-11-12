@@ -71,8 +71,9 @@ unset VAULT_TOKEN
 
 ## 5. Host-local settings
 
-Edit `/opt/glowderma/runtime/local.env`: `OPS_ALLOWED_IPS` (space-separated office IPs for the ops console),
-and the backup settings of [disaster-recovery.md](disaster-recovery.md).
+Edit `/opt/glowderma/runtime/local.env`: `OPS_ALLOWED_IPS` (the Tailscale IPs of the devices allowed into the
+ops console, space separated: see [ops-console-access.md](ops-console-access.md)), and the backup settings of
+[disaster-recovery.md](disaster-recovery.md).
 
 ## 6. First deploy
 

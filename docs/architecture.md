@@ -38,7 +38,7 @@ no network, no database, no Vault. The only shared thing is this repository's te
 | `/media/*` | files on disk | uploaded images, served by Caddy |
 | everything else | Next.js | storefront, `/admin` panel, Next's own `/api/shop/*` and `/api/revalidate` |
 | `https://www.<SITE_DOMAIN>` | 308 to the apex | |
-| `https://<OPS_DOMAIN>/django-admin/` | Django ops console | only from `OPS_ALLOWED_IPS`, 404 for everyone else |
+| `https://<OPS_DOMAIN>/django-admin/` | Django ops console | only from `OPS_ALLOWED_IPS` (Tailscale device IPs, [ops-console-access.md](ops-console-access.md)), 404 for everyone else |
 
 The browser never talks to Django for the admin panel: Next is a backend-for-frontend that calls
 `http://172.30.0.30:8000` with the internal secret. Django accepts `/api/v1/admin/*` only from Next's fixed

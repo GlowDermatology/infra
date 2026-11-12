@@ -67,3 +67,4 @@ those repositories only **build, scan and publish images**, then write the new i
 - [Security](docs/security.md): hardening, scanners, threat model, accepted risks
 - [First server runbook](docs/first-server-runbook.md): from an empty VPS to a running environment
 - [Disaster recovery](docs/disaster-recovery.md): backups, restore, rebuilding a server
+- [Ops console access](docs/ops-console-access.md): reaching the Django ops console through Tailscale
