@@ -44,6 +44,11 @@ for app in backend frontend; do
 done
 for file in vault/tls/ca.crt vault/tls/vault.crt vault/tls/vault.key \
 	vault/approle/backend/secret_id vault/approle/frontend/secret_id vault/approle/datastores/secret_id; do
+	dir="$(dirname "$RUNTIME_DIR/$file")"
+	[ -d "$dir" ] || die "$dir is missing: finish docs/first-server-runbook.md first"
+	# The AppRole directories are 0500 and owned by the agent's UID: the deploy user cannot look inside. Their
+	# files are then checked by the agents' healthchecks (step 4 waits for every agent to render).
+	[ -x "$dir" ] || continue
 	[ -s "$RUNTIME_DIR/$file" ] || die "$RUNTIME_DIR/$file is missing: finish docs/first-server-runbook.md first"
 done
 app_compose config --quiet || die "compose/app.yaml does not resolve for $ENV"

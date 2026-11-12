@@ -35,7 +35,8 @@ import() {
 		value="${BASH_REMATCH[2]}"
 		if [ -z "$value" ] || [ "$key" = GLOWDERMA_DATA_SOURCE ]; then
 			note "skip  $key"
-		elif vault_cli kv get -mount=secret -field="$key" "$ENV/$path" >/dev/null 2>&1; then
+		# </dev/null: `docker compose exec` would otherwise read (and swallow) the rest of the file.
+		elif vault_cli kv get -mount=secret -field="$key" "$ENV/$path" </dev/null >/dev/null 2>&1; then
 			note "keep  $key (already in Vault)"
 		else
 			note "add   $key=$value"
@@ -43,7 +44,7 @@ import() {
 		fi
 	done <<<"$text"
 	if [ "${#pairs[@]}" -gt 0 ]; then
-		vault_cli kv patch -mount=secret "$ENV/$path" "${pairs[@]}" >/dev/null
+		vault_cli kv patch -mount=secret "$ENV/$path" "${pairs[@]}" </dev/null >/dev/null
 	fi
 }
 
