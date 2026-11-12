@@ -21,7 +21,7 @@ env_file_text() {
 	fi
 	rev="$(git -c safe.directory="$INFRA_DIR" -C "$INFRA_DIR" log -1 --format=%H -- "$rel")"
 	[ -n "$rev" ] || die "$rel exists neither in this checkout nor in its history"
-	note "($rel read from git: the version before commit ${rev:0:7})"
+	note "($rel read from git: the version before commit ${rev:0:7})" >&2
 	git -c safe.directory="$INFRA_DIR" -C "$INFRA_DIR" show "$rev^:$rel"
 }
 
