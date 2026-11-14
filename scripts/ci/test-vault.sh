@@ -121,6 +121,29 @@ check "rendered files are 0400" "[ \"\$(stat -c %a $b $f $d/redis.conf $d/object
 check "no previous-render backups" "! ls $work/out-*/*.bak* >/dev/null 2>&1"
 pkill -f "$work/.*\.hcl" 2>/dev/null || true
 
+# Fail closed: when secret/<env>/object-storage or secret/<env>/s3 is missing (an existing environment where
+# generate-app-secrets.sh was not rerun, or a deleted path), the datastores agent must not leave an EMPTY
+# object storage file (an empty s3.json could mean open access, an empty admin key a blank credential).
+neg_case() { # <label> <env> <path to delete>
+	local label="$1" nenv="$2" gone="$3" nout="$work/neg-$1"
+	mkdir -p "$nout"
+	VAULT_TOKEN=root "$vault" kv metadata delete -mount=secret "$nenv/$gone" >/dev/null
+	sed -e "s#https://vault:8200#$VAULT_ADDR#" -e '/ca_cert/d' 		-e "s#/vault/approle#$work/rt-$nenv/vault/approle/datastores#g" 		-e "s#/vault/agent/templates#$here/vault/agent/templates#g" 		-e "s#/run/secrets#$nout#g" -e "s#/tmp/agent.pid#$work/neg-$label.pid#" 		"$here/vault/agent/datastores.hcl" >"$work/neg-$label.hcl"
+	GLOWDERMA_ENV="$nenv" VAULT_TOKEN='' "$vault" agent -config="$work/neg-$label.hcl" >"$work/neg-$label.log" 2>&1 &
+	sleep 10
+	pkill -f "$work/neg-$label.hcl" 2>/dev/null || true
+	check "$label: no object storage file is written empty" "python3 -c \"
+import os
+for n in ('object_storage_s3.json', 'object_storage_admin_access_key', 'object_storage_admin_secret_key'):
+    p = '$nout/' + n
+    assert not os.path.exists(p) or os.path.getsize(p) > 0, n
+\""
+	check "$label: object_storage_s3.json is not written at all" "[ ! -e $nout/object_storage_s3.json ]"
+	check "$label: the render error names the template, not a secret value" "grep -q 'object_storage' $work/neg-$label.log && ! grep -qF \"\$(cat $work/rt-$nenv/vault/approle/datastores/secret_id)\" $work/neg-$label.log"
+}
+neg_case missing-object-storage production object-storage
+neg_case missing-s3 staging s3
+
 echo
 [ "$failures" -eq 0 ] || { echo "$failures Vault check(s) failed"; exit 1; }
 echo "Vault design: all checks passed"
