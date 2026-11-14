@@ -200,7 +200,7 @@ services:
   # ---------------------------------------------------------------- object storage (optional)
   # Self-hosted S3 (SeaweedFS), only when OBJECT_STORAGE_ENABLED=true (scripts/lib.sh adds the profile). Identities
   # come from the s3.json that vault-agent-datastores renders (admin, app, anonymous read of the media bucket).
-  # No published ports: the edge (media GET) and the backend (S3 API) reach it at 172.30.0.40:8333.
+  # No published ports: the edge (media GET) reaches it at 172.30.0.40:8333 on front; the backend and the init at object-storage:8333 on back.
   object-storage:
     <<: *hardened
     profiles: ["object-storage"]
@@ -238,7 +238,7 @@ services:
       start_period: 60s
 
   # One-shot (profile "object-storage-tools"): creates the media bucket, idempotent. Run by scripts/deploy.sh with
-  # `run --rm`, never `up`. On "front" because the object storage is addressed by its front IPv4 literal.
+  # `run --rm`, never `up`. On "back": it reaches the storage by service DNS (object-storage:8333).
   object-storage-init:
     <<: *hardened
     profiles: ["object-storage-tools"]
@@ -248,14 +248,14 @@ services:
     entrypoint: ["/bin/sh", "/init/init.sh"]
     environment:
       OBJECT_STORAGE_BUCKET: glowderma-media
-      OBJECT_STORAGE_ENDPOINT: http://172.30.0.40:8333
+      OBJECT_STORAGE_ENDPOINT: http://object-storage:8333
       HOME: /tmp
     volumes:
       - ../object-storage:/init:ro
       - datastores-secrets:/run/secrets:ro
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media-mirror:/mirror
     tmpfs: ["/tmp"]
-    networks: [front]
+    networks: [back]
     mem_limit: 256m
     pids_limit: 64
     depends_on:

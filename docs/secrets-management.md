@@ -47,7 +47,7 @@ full settings, Celery app included: a separate Celery identity would hold the sa
 `secret/<env>/s3` holds the provider settings (`S3_ENDPOINT_URL`, `S3_BUCKET_NAME`, `S3_REGION_NAME`,
 `S3_ADDRESSING_STYLE`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, optional `S3_VERIFY`, `PUBLIC_MEDIA_BASE_URL`);
 every key becomes an environment variable in `django.json`, like `secret/<env>/django`. The seeded values point
-at the stack's own SeaweedFS (`http://172.30.0.40:8333`, bucket `glowderma-media`); its `s3.json` identities file is
+at the stack's own SeaweedFS (`http://object-storage:8333`, bucket `glowderma-media`); its `s3.json` identities file is
 rendered by the datastores agent from `s3` (the `app` pair) and `object-storage` (the `admin` pair).
 
 - Change provider or bucket: `vault kv patch secret/<env>/s3 ...`, then `scripts/restart.sh <env> backend` (no PR).

@@ -154,19 +154,22 @@ for env in ("staging", "production"):
         init = app["services"]["object-storage-init"]
         store_ip = (store.get("networks", {}).get("front") or {}).get("ipv4_address")
         if "back" not in store.get("networks", {}):
-            err(f"{env}/object-storage: must also be on the 'back' network (workers and init reach it there)")
+            err(f"{env}/object-storage: must be on the 'back' network (the backend and the init reach it there by service name)")
         seeded = Path("scripts/vault/generate-app-secrets.sh").read_text()
-        seeded_url = re.search(r'"S3_ENDPOINT_URL":"http://([0-9.]+):8333"', seeded)
+        seeded_url = re.search(r'"S3_ENDPOINT_URL":"([^"]*)"', seeded)
         seeded_bucket = re.search(r'"S3_BUCKET_NAME":"([^"]+)"', seeded)
         edge_env_os = app["services"]["edge"]["environment"]
         upstream = edge_env_os.get("OBJECT_STORAGE_UPSTREAM", "")
         addresses = {
             "object-storage ipv4_address": store_ip,
             "edge OBJECT_STORAGE_UPSTREAM": upstream.rsplit(":", 1)[0] if upstream else None,
-            "seeded S3_ENDPOINT_URL (scripts/vault/generate-app-secrets.sh)": seeded_url and seeded_url.group(1),
         }
         if len(set(addresses.values())) != 1 or None in addresses.values():
-            err(f"{env}: the object storage address differs between: {addresses}")
+            err(f"{env}: the edge upstream address differs from the object-storage ipv4_address: {addresses}")
+        if not seeded_url or seeded_url.group(1) != "http://object-storage:8333":
+            err(f"{env}: seeded S3_ENDPOINT_URL in scripts/vault/generate-app-secrets.sh must be exactly http://object-storage:8333")
+        if "back" not in init.get("networks", {}):
+            err(f"{env}/object-storage-init: must be on the 'back' network (it reaches the storage by service name)")
         if upstream and not upstream.endswith(":8333"):
             err(f"{env}: edge OBJECT_STORAGE_UPSTREAM must point at the S3 port 8333")
         buckets = {

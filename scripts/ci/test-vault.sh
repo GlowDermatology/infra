@@ -58,7 +58,9 @@ done
 snapshot() { for p in django s3 object-storage; do VAULT_TOKEN=root "$vault" kv get -format=json -mount=secret "staging/$p" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['data']['data'], sort_keys=True))"; done; }
 before="$(snapshot)"
 env GLOWDERMA_SKIP_ENV_GUARD=1 RUNTIME_DIR="$work/rt-staging" VAULT_LOCAL_BIN="$vault" VAULT_TOKEN=root 	"$here/scripts/vault/generate-app-secrets.sh" staging >/dev/null
-check "a second generate-app-secrets.sh run keeps existing values" "[ \"\$(snapshot)\" = \"\$before\" ]"
+same=0
+[ "$(snapshot)" = "$before" ] && same=1
+check "a second generate-app-secrets.sh run keeps existing values" "[ $same = 1 ]"
 
 # Real agents render every template.
 for role in backend frontend datastores; do

@@ -7,7 +7,7 @@
 set -eu
 
 : "${OBJECT_STORAGE_BUCKET:?OBJECT_STORAGE_BUCKET is not set}"
-endpoint="${OBJECT_STORAGE_ENDPOINT:-http://172.30.0.40:8333}"
+endpoint="${OBJECT_STORAGE_ENDPOINT:-http://object-storage:8333}"
 
 for f in /run/secrets/object_storage_admin_access_key /run/secrets/object_storage_admin_secret_key; do
 	[ -s "$f" ] || {
