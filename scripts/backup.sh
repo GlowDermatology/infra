@@ -11,7 +11,7 @@
 #
 # Off-host copy (docs/disaster-recovery.md), configured in /opt/glowderma/runtime/local.env:
 #   BACKUP_AGE_RECIPIENT=age1...      public key; the private key lives OFF this server (password manager)
-#   BACKUP_RCLONE_REMOTE=uzbackup:glowderma/<env>   an rclone remote in Uzbekistan (compliance)
+#   BACKUP_RCLONE_REMOTE=offsite:glowderma/<env>    an rclone remote off this server
 # Plaintext never leaves the host: a remote without an age recipient is refused.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 use_env "${1:-}"
