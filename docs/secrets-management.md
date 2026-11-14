@@ -102,6 +102,7 @@ container entrypoint waits for the file to exist before starting Django.
 | Change | Command (on the server) |
 |---|---|
 | add/change Django or Next keys in the Vault UI (SSH tunnel, see `vault/config/vault.hcl`) | then GitHub Actions → **Restart** → `<env>` + `backend`/`frontend`/`all` (or `scripts/restart.sh <env> <target>` on the server) |
+| change `/opt/glowderma/runtime/local.env` on the server | Actions → **Restart** → `<env>` + `edge` (Caddy only) or `all` (`OPS_ALLOWED_IPS`: Caddy and Django read it) |
 | add/change one Django or Next secret | `scripts/vault/put-secret.sh <env> django <KEY>` (hidden prompt, then `restart.sh`) |
 | rotate the database app password | `scripts/vault/rotate-db-password.sh <env>` |
 | rotate the internal API secret | `scripts/vault/rotate-internal-secret.sh <env>` |

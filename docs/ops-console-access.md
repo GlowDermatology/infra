@@ -69,11 +69,12 @@ On the server, edit `/opt/glowderma/runtime/local.env` and set your device IPs, 
 OPS_ALLOWED_IPS=100.101.1.5/32
 ```
 
-Both Caddy and Django read it, so restart both:
+Both Caddy and Django read it, so restart both: GitHub Actions → **Restart** → `<env>` → **all**. Or, on the
+server:
 
 ```bash
 cd /opt/glowderma/infra
-su deploy -c 'scripts/deploy.sh <env> --restart edge backend-api'
+su deploy -c 'scripts/restart.sh <env> all'
 ```
 
 Allow single devices (`/32`), not the whole `100.64.0.0/10` range: that range also belongs to other people's

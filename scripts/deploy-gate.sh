@@ -7,7 +7,7 @@
 # Whatever the client asks for, sshd runs this script instead. It accepts exactly two requests:
 #
 #   deploy <staging|production> <40-hex infra commit> <GHCR user>      (GHCR token = first line of stdin)
-#   restart <staging|production> <backend|frontend|all>               (scripts/restart.sh: reload from Vault)
+#   restart <staging|production> <backend|frontend|edge|all>          (scripts/restart.sh: reload from Vault)
 #
 # deploy only for a commit that is already on origin/main; restart runs the checkout already deployed. So a
 # leaked deploy key gives no shell, and the most it can do is redeploy something already on main or restart
@@ -24,7 +24,7 @@ INFRA_DIR=/opt/glowderma/infra
 LOCK=/opt/glowderma/runtime/deploy.lock
 
 read -r -a request <<<"${SSH_ORIGINAL_COMMAND:-}"
-usage="only 'deploy <env> <commit> <ghcr-user>' or 'restart <env> <backend|frontend|all>' is allowed"
+usage="only 'deploy <env> <commit> <ghcr-user>' or 'restart <env> <backend|frontend|edge|all>' is allowed"
 [ "${#request[@]}" -ge 3 ] || refuse "$usage"
 env="${request[1]}"
 [[ "$env" =~ ^(staging|production)$ ]] || refuse "unknown environment '$env'"
@@ -33,7 +33,7 @@ env="${request[1]}"
 if [ "${request[0]}" = restart ]; then
 	[ "${#request[@]}" -eq 3 ] || refuse "$usage"
 	target="${request[2]}"
-	[[ "$target" =~ ^(backend|frontend|all)$ ]] || refuse "unknown restart target '$target'"
+	[[ "$target" =~ ^(backend|frontend|edge|all)$ ]] || refuse "unknown restart target '$target'"
 	exec 9>"$LOCK"
 	flock -w 900 9 || refuse "a deploy or restart holds the lock"
 	cd "$INFRA_DIR"

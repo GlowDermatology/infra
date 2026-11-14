@@ -176,7 +176,7 @@ The SSH session takes a lock (`runtime/deploy.lock`): two deploys never overlap.
 `restrict,command="/usr/local/sbin/glowderma-deploy-gate"`, a root-owned copy of
 [scripts/deploy-gate.sh](../scripts/deploy-gate.sh), and removes it from root's `authorized_keys`. Whatever a
 client sends, sshd runs the gate, which accepts two requests: `deploy <env> <40-hex commit> <ghcr-user>`, only
-for a commit already on `origin/main`, and `restart <env> <backend|frontend|all>` (below). A leaked deploy key
+for a commit already on `origin/main`, and `restart <env> <backend|frontend|edge|all>` (below). A leaked deploy key
 can therefore only redeploy something on `main` or restart the apps.
 Root access needs `VPS_BOOTSTRAP_SSH_KEY`, which only the Bootstrap workflow uses; you can remove that secret
 between bootstraps and add it back when you need one.
@@ -188,7 +188,7 @@ from `origin/main`).
 ### Restart: reload settings and secrets from Vault
 
 After changing `secret/<env>/django` or `secret/<env>/frontend` (Vault UI, `vault kv patch`): Actions →
-**Restart** → environment + target (`backend`, `frontend`, `all`). Through the gate it runs
+**Restart** → environment + target (`backend`, `frontend`, `edge`, `all`). Through the gate it runs
 [scripts/restart.sh](../scripts/restart.sh) on the release already deployed: refuses while Vault is sealed,
 deletes the rendered file and restarts the agent (so the app cannot pick up the old file), waits for a fresh
 render, recreates the app, runs `healthcheck.sh`. It shares the deploy lock and the `deploy-<env>` concurrency

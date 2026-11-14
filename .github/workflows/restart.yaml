@@ -15,9 +15,9 @@ on:
         options: [staging, production]
         required: true
       target:
-        description: What to reload from Vault
+        description: What to restart (backend/frontend reload Vault; edge = Caddy, after a local.env change; all = everything)
         type: choice
-        options: [backend, frontend, all]
+        options: [all, backend, frontend, edge]
         default: all
         required: true
 

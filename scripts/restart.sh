@@ -3,7 +3,10 @@
 # Run it after changing secret/<env>/django or secret/<env>/frontend (Vault UI, `vault kv patch`, put-secret.sh).
 # The Restart workflow runs it through the deploy gate; on the server it is also safe to run by hand.
 #
-#   scripts/restart.sh <staging|production> <backend|frontend|all>
+#   scripts/restart.sh <staging|production> <backend|frontend|edge|all>
+#
+# edge recreates Caddy only, no Vault involved: after changing the server's runtime/local.env. OPS_ALLOWED_IPS is
+# read by Caddy AND Django, so after changing it use all (= backend + frontend + edge).
 #
 # For the backend it first runs the deploy's media preflight (secret/<env>/s3 against stack.env: a Vault-only switch
 # away from the stack's own object storage is refused, it needs OBJECT_STORAGE_ENABLED=false), and afterwards, with
@@ -19,12 +22,23 @@ target="${2:-}"
 case "$target" in
 backend) agents=(vault-agent-backend) services=(backend-api backend-worker backend-beat) ;;
 frontend) agents=(vault-agent-frontend) services=(frontend) ;;
+edge) agents=() services=(edge) ;;
 all)
 	agents=(vault-agent-backend vault-agent-frontend)
-	services=(backend-api backend-worker backend-beat frontend)
+	services=(backend-api backend-worker backend-beat frontend edge)
 	;;
-*) die "usage: restart.sh <env> <backend|frontend|all>" ;;
+*) die "usage: restart.sh <env> <backend|frontend|edge|all>" ;;
 esac
+with_backend=false
+case "$target" in backend | all) with_backend=true ;; esac
+
+if [ "${#agents[@]}" -eq 0 ]; then
+	# Caddy reads no Vault value: recreate it (picks up runtime/local.env) and check the site.
+	"$INFRA_DIR/scripts/deploy.sh" "$ENV" --restart "${services[@]}"
+	"$INFRA_DIR/scripts/healthcheck.sh" "$ENV"
+	log "Restarted ${services[*]} ($ENV)"
+	exit 0
+fi
 
 set +e
 vault_compose exec -T vault vault status >/dev/null 2>&1
@@ -36,7 +50,7 @@ case $vault_status in
 *) die "Vault does not answer: nothing restarted. scripts/healthcheck.sh $ENV" ;;
 esac
 
-if [ "$target" != frontend ]; then
+if [ "$with_backend" = true ]; then
 	media_preflight
 fi
 
@@ -54,7 +68,7 @@ app_compose up -d --no-deps --wait --wait-timeout 180 "${agents[@]}" ||
 
 "$INFRA_DIR/scripts/deploy.sh" "$ENV" --restart "${services[@]}"
 "$INFRA_DIR/scripts/healthcheck.sh" "$ENV"
-if [ "$target" != frontend ]; then
+if [ "$with_backend" = true ]; then
 	check_media_storage "The backend now runs with these Vault values: fix secret/$ENV/s3 and rerun this script."
 fi
 log "Restarted ${services[*]} ($ENV) with the current Vault values"
