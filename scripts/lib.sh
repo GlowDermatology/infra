@@ -136,24 +136,56 @@ secret_must_exist() {
 	die "reading secret/$ENV/$1 from Vault failed (exit $rc)"
 }
 
-# media_preflight: refuses a deploy whose media settings cannot work. Messages name keys, never values.
-#   OBJECT_STORAGE_ENABLED or USE_S3 true  -> secret/<env>/s3 must exist (and secret/<env>/object-storage with the
-#                                             object storage)
-#   USE_S3 true, object storage off        -> an external provider: its endpoint must not be the stack's own
-#                                             (host `object-storage`) and PUBLIC_MEDIA_BASE_URL must be set
+# s3_endpoint_host: the host of S3_ENDPOINT_URL in secret/<env>/s3 (empty when the key is not set). Call it after
+# secret_must_exist s3: the secret is then readable, so a failing field read means the optional key is absent. The
+# value is only compared, never printed.
+s3_endpoint_host() {
+	url_host "$(vault_kv get -mount=secret -field=S3_ENDPOINT_URL "$ENV/s3" 2>/dev/null || true)"
+}
+
+# own_storage_endpoint_check: with MEDIA_BACKEND=object-storage, /media and the nightly mirror use the stack's own
+# bucket, so Django must use it too: dies unless S3_ENDPOINT_URL in secret/<env>/s3 has the host `object-storage`.
+# Call it after secret_must_exist s3 (as s3_endpoint_host).
+own_storage_endpoint_check() {
+	[ "$(s3_endpoint_host)" = object-storage ] ||
+		die "OBJECT_STORAGE_ENABLED=true and USE_S3=true, but S3_ENDPOINT_URL in secret/$ENV/s3 is not the stack's object
+       storage (host object-storage): /media and the backups would follow the stack's bucket while Django writes
+       elsewhere. To use another provider, set OBJECT_STORAGE_ENABLED=false in stack.env (docs/deployment.md)."
+}
+
+# check_media_storage <what to do on failure>: with USE_S3=true, Django must really use the bucket
+# (manage.py media_storage_check in the running backend-api). Dies with its output otherwise.
+check_media_storage() {
+	[ "$(stack_value USE_S3)" = true ] || return 0
+	log "Checking the media storage"
+	local out
+	if ! out="$(app_compose exec -T backend-api python manage.py media_storage_check 2>&1)"; then
+		echo "$out" >&2
+		die "media_storage_check failed: Django cannot use the bucket (secret/$ENV/s3). $1"
+	fi
+	note "$out"
+}
+
+# media_preflight: refuses a deploy (or a backend restart) whose media settings cannot work. Messages name keys,
+# never values.
+#   always                             -> secret/<env>/s3 must exist: django.json renders it in every mode
+#   OBJECT_STORAGE_ENABLED true        -> secret/<env>/object-storage must exist too
+#   USE_S3 true, object storage on     -> S3_ENDPOINT_URL must be the stack's own (host `object-storage`)
+#   USE_S3 true, object storage off    -> an external provider: its endpoint must not be the stack's own and
+#                                         PUBLIC_MEDIA_BASE_URL must be set
 media_preflight() {
-	local storage use_s3 endpoint public
+	local storage use_s3 public
 	storage="$(stack_value OBJECT_STORAGE_ENABLED)"
 	use_s3="$(stack_value USE_S3)"
-	[ "$storage" = true ] || [ "$use_s3" = true ] || return 0
 	secret_must_exist s3 S3_BUCKET_NAME
 	[ "$storage" != true ] || secret_must_exist object-storage OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID
-	if [ "$use_s3" = true ] && [ "$storage" != true ]; then
-		# The secret was just read successfully, so a failing field read here means the optional key is not set.
-		endpoint="$(vault_kv get -mount=secret -field=S3_ENDPOINT_URL "$ENV/s3" 2>/dev/null || true)"
-		public="$(vault_kv get -mount=secret -field=PUBLIC_MEDIA_BASE_URL "$ENV/s3" 2>/dev/null || true)"
-		[ "$(url_host "$endpoint")" != object-storage ] ||
-			die "USE_S3 points at the stack's object storage but OBJECT_STORAGE_ENABLED=false"
-		[ -n "$public" ] || die "an external provider needs PUBLIC_MEDIA_BASE_URL in secret/$ENV/s3"
+	[ "$use_s3" = true ] || return 0
+	if [ "$storage" = true ]; then
+		own_storage_endpoint_check
+		return 0
 	fi
+	public="$(vault_kv get -mount=secret -field=PUBLIC_MEDIA_BASE_URL "$ENV/s3" 2>/dev/null || true)"
+	[ "$(s3_endpoint_host)" != object-storage ] ||
+		die "USE_S3 points at the stack's object storage but OBJECT_STORAGE_ENABLED=false"
+	[ -n "$public" ] || die "an external provider needs PUBLIC_MEDIA_BASE_URL in secret/$ENV/s3"
 }

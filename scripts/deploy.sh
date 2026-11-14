@@ -138,20 +138,26 @@ if ! app_compose up -d --remove-orphans --wait --wait-timeout 600; then
 	done
 	die "the release did not become healthy"
 fi
+# `--remove-orphans` keeps the containers of a service whose profile is off: with OBJECT_STORAGE_ENABLED=false a
+# previously started object storage would keep running. Stop and remove the container; its data stays in
+# runtime/object-storage. With USE_S3=true the backend may still run on it (`up` did not recreate it: its own
+# config did not change), so first move it to the provider now in secret/<env>/s3: restart.sh renders django.json
+# afresh, recreates the backend and runs media_storage_check.
+if [ "$(stack_value OBJECT_STORAGE_ENABLED)" != true ] && [ -n "$(app_compose ps -a -q object-storage)" ]; then
+	if [ "$(stack_value USE_S3)" = true ]; then
+		log "Object storage disabled: restarting the backend on the provider in secret/$ENV/s3"
+		"$INFRA_DIR/scripts/restart.sh" "$ENV" backend
+	fi
+	log "Object storage disabled: removing its container (data kept in $RUNTIME_DIR/object-storage)"
+	app_compose rm -s -f object-storage
+fi
 
 # 6. finish -------------------------------------------------------------------------------------------------
 app_compose exec -T edge caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 "$INFRA_DIR/scripts/healthcheck.sh" "$ENV"
 
 # Media in S3: Django must really use the bucket before this release counts as deployed.
-if [ "$(stack_value USE_S3)" = true ]; then
-	log "Checking the media storage"
-	if ! check_out="$(app_compose exec -T backend-api python manage.py media_storage_check 2>&1)"; then
-		echo "$check_out" >&2
-		die "media_storage_check failed: Django cannot use the bucket (secret/$ENV/s3). Roll back: docs/deployment.md"
-	fi
-	note "$check_out"
-fi
+check_media_storage "Roll back: docs/deployment.md"
 
 printf '%s\n' "$backend_digest" >"$RUNTIME_DIR/deployed/backend.digest"
 image_value frontend DIGEST >"$RUNTIME_DIR/deployed/frontend.digest"

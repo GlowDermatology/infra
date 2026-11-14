@@ -61,7 +61,17 @@ finish "$db"
 if [ "$label" = nightly ]; then
 	# Media: on disk, mirrored out of the stack's object storage, or an external provider (not our data).
 	media_src=""
-	if [ "$(media_backend)" = object-storage ]; then
+	media_error=""
+	# The mirror follows stack.env; Django follows secret/<env>/s3. If they disagree (a Vault-only switch to another
+	# provider), mirroring the stack's bucket would back up a stale copy without a word: refuse it loudly instead and
+	# still finish the database and Vault backups (the script then exits non-zero).
+	if [ "$(media_backend)" = object-storage ] && ! (
+		secret_must_exist s3 S3_BUCKET_NAME
+		own_storage_endpoint_check
+	); then
+		media_error="media NOT backed up: Django does not use the stack's object storage (see the error above)"
+		echo "ERROR: $media_error" >&2
+	elif [ "$(media_backend)" = object-storage ]; then
 		# Admin keys are read from files inside the container (as in object-storage/init.sh), never put in argv.
 		app_compose --profile object-storage-tools run --rm --no-deps -T -e MEDIA_LOCATION="$(stack_value S3_LOCATION)" \
 			--entrypoint sh object-storage-init -c '
@@ -117,3 +127,4 @@ if [ -n "$remote" ]; then
 	done
 	echo "backup $label: copied ${#created[@]} file(s) to $remote"
 fi
+[ -z "${media_error:-}" ] || die "$media_error"

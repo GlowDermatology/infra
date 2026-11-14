@@ -50,7 +50,9 @@ every key becomes an environment variable in `django.json`, like `secret/<env>/d
 at the stack's own SeaweedFS (`http://object-storage:8333`, bucket `glowderma-media`); its `s3.json` identities file is
 rendered by the datastores agent from `s3` (the `app` pair) and `object-storage` (the `admin` pair).
 
-- Change provider or bucket: `vault kv patch secret/<env>/s3 ...`, then `scripts/restart.sh <env> backend` (no PR).
+- Change provider or bucket: `vault kv patch secret/<env>/s3 ...`, then `scripts/restart.sh <env> backend` (no PR)
+  while on an external provider. Leaving the stack's own storage also needs `OBJECT_STORAGE_ENABLED=false` in
+  `stack.env` (a PR): `restart.sh`, the deploy and the backup refuse the mix (docs/deployment.md).
   For an external provider also set `PUBLIC_MEDIA_BASE_URL` there.
 - The frontend's `GLOWDERMA_MEDIA_HOSTS` is build-time: a new image host still needs a frontend rebuild.
 - Never put `USE_S3` or `S3_LOCATION` in `secret/<env>/s3`: they are topology keys (`stack.env`) and the backend

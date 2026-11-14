@@ -70,8 +70,10 @@ EXT="https://$SECRET_ENDPOINT_MARK.s3.example.com"
 PUB="https://$SECRET_PUBLIC_MARK.example.com/media/"
 FIX="run scripts/vault/generate-app-secrets.sh staging first"
 
-# Both off: Vault is not even asked.
-run_case "both off: nothing to check" false false missing missing "" "" ok
+# Both off: secret/<env>/s3 is still required (django.json renders it in every mode); object-storage is not asked.
+run_case "both off, s3 present" false false present missing "" "" ok
+run_case "both off, s3 missing" false false missing missing "" "" fail "$FIX"
+run_case "both off, Vault read fails" false false error missing "" "" fail "reading secret/staging/s3 from Vault failed"
 # A failing Vault read is not "missing".
 run_case "object storage, Vault read fails" true false error present "" "" fail "reading secret/staging/s3 from Vault failed"
 run_case "object storage, object-storage read fails" true false present error "" "" fail "reading secret/staging/object-storage from Vault failed"
@@ -80,6 +82,12 @@ run_case "object storage, s3 missing" true false missing present "" "" fail "$FI
 run_case "object storage, object-storage missing" true false present missing "" "" fail "$FIX"
 run_case "object storage, both present" true false present present "http://object-storage:8333" "" ok
 run_case "object storage + USE_S3 (own endpoint, no public url needed)" true true present present "http://object-storage:8333" "" ok
+# A Vault-only switch to another provider while the stack still runs its own storage: /media and the backups would
+# keep following the stack's bucket.
+run_case "object storage + USE_S3, external endpoint" true true present present "$EXT" "$PUB" fail \
+	"set OBJECT_STORAGE_ENABLED=false in stack.env"
+run_case "object storage + USE_S3, endpoint unset" true true present present "" "" fail \
+	"S3_ENDPOINT_URL in secret/staging/s3 is not the stack's object"
 # External provider.
 run_case "USE_S3, s3 missing" false true missing missing "" "" fail "$FIX"
 run_case "USE_S3, own endpoint, object storage off" false true present missing "http://object-storage:8333" "$PUB" fail \
