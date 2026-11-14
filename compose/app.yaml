@@ -126,6 +126,9 @@ services:
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/tls/ca.crt:/vault/tls/ca.crt:ro
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/approle/datastores:/vault/approle:ro
       - datastores-secrets:/run/secrets
+      # The object storage's files (s3.json, admin keys) go to their own volume: the network-facing storage and its
+      # init never see the postgres and redis passwords.
+      - object-storage-secrets:/run/object-storage-secrets
     healthcheck:
       test: ["CMD-SHELL", "test -s /run/secrets/postgres_superuser_password && test -s /run/secrets/postgres_app_password && test -s /run/secrets/redis.conf && test -s /run/secrets/redis_password"]
       interval: 5s
@@ -201,6 +204,9 @@ services:
   # Self-hosted S3 (SeaweedFS), only when OBJECT_STORAGE_ENABLED=true (scripts/lib.sh adds the profile). Identities
   # come from the s3.json that vault-agent-datastores renders (admin, app, anonymous read of the media bucket).
   # No published ports: the edge (media GET) reaches it at 172.30.0.40:8333 on front; the backend and the init at object-storage:8333 on back.
+  # Only the S3 gateway listens off-container (8333, its gRPC 18333 refuses admin calls without a local client). Master,
+  # volume and filer (9333, 8080, 8888 and their gRPC ports) answer on 127.0.0.1 only: they have no authentication and
+  # would bypass the s3.json identities. The Iceberg and Lance listeners are off, telemetry is off.
   object-storage:
     <<: *hardened
     profiles: ["object-storage"]
@@ -216,10 +222,13 @@ services:
         until [ -s /run/secrets/object_storage_s3.json ]; do echo 'waiting for Vault secrets'; sleep 3; done;
         exec /entrypoint.sh "$$@"
       - sh
-    command: server -dir=/data -s3 -s3.config=/run/secrets/object_storage_s3.json -ip.bind=0.0.0.0
+    command: >-
+      server -dir=/data -s3 -s3.config=/run/secrets/object_storage_s3.json
+      -ip=127.0.0.1 -ip.bind=127.0.0.1 -s3.ip.bind=0.0.0.0
+      -s3.port.iceberg=0 -s3.port.lance=0 -master.telemetry=false
     volumes:
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/object-storage:/data
-      - datastores-secrets:/run/secrets:ro
+      - object-storage-secrets:/run/secrets:ro
     # The server keeps its gRPC unix sockets in /tmp.
     tmpfs: ["/tmp"]
     networks:
@@ -252,7 +261,7 @@ services:
       HOME: /tmp
     volumes:
       - ../object-storage:/init:ro
-      - datastores-secrets:/run/secrets:ro
+      - object-storage-secrets:/run/secrets:ro
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media-mirror:/mirror
     tmpfs: ["/tmp"]
     networks: [back]
@@ -427,4 +436,8 @@ volumes:
   frontend-secrets:
     driver_opts: {type: tmpfs, device: tmpfs, o: "uid=1000,gid=1000,mode=0700,size=1m"}
   datastores-secrets:
+    driver_opts: {type: tmpfs, device: tmpfs, o: "uid=999,gid=999,mode=0700,size=1m"}
+  # The object storage's s3.json and admin key files only (vault-agent-datastores writes, object-storage and
+  # object-storage-init read).
+  object-storage-secrets:
     driver_opts: {type: tmpfs, device: tmpfs, o: "uid=999,gid=999,mode=0700,size=1m"}

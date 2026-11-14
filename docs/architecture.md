@@ -58,7 +58,7 @@ addresses in `compose/app.yaml` and the Django/gunicorn gates agree.
 | `backend-migrate` | same | 10001 | one-shot `migrate`, run only by `deploy.sh` |
 | `postgres` | postgres 18.6 | 999 | data; superuser for admin, `glowderma_app` for Django |
 | `redis` | redis 8.10 | 999 | DB 0 cache, DB 1 Celery broker (AOF, noeviction) |
-| `object-storage` | seaweedfs 4.53 (optional: `OBJECT_STORAGE_ENABLED=true`) | 999 | S3 API for media on `back` (`object-storage:8333`) and `front` (Caddy reads); identities from the datastores agent |
+| `object-storage` | seaweedfs 4.53 (optional: `OBJECT_STORAGE_ENABLED=true`) | 999 | S3 API for media on `back` (`object-storage:8333`) and `front` (Caddy reads); identities from the datastores agent, in their own secrets volume. Only the S3 port listens off-container (master, volume, filer on 127.0.0.1) |
 | `object-storage-init` | aws-cli 2.40 | 999 | one-shot (`deploy.sh`): creates the bucket. The nightly backup also runs it for the mirror |
 | `vault-agent-*` | vault 2.2.1 | consumer's UID | render secrets for one consumer group |
 | `vault` (own project) | vault 2.2.1 | 100 | secrets, Raft storage, TLS, audit log |

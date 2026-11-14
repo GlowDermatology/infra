@@ -80,7 +80,7 @@ for role in backend frontend datastores; do
 	sed -e "s#https://vault:8200#$VAULT_ADDR#" -e '/ca_cert/d' -e 's#static_secret_render_interval = "5m"#static_secret_render_interval = "2s"#' \
 		-e "s#/vault/approle#$work/rt-staging/vault/approle/$role#g" \
 		-e "s#/vault/agent/templates#$here/vault/agent/templates#g" \
-		-e "s#/run/secrets#$out#g" -e "s#/tmp/agent.pid#$work/$role.pid#" \
+		-e "s#/run/object-storage-secrets#$out#g" -e "s#/run/secrets#$out#g" -e "s#/tmp/agent.pid#$work/$role.pid#" \
 		"$here/vault/agent/$role.hcl" >"$work/$role.hcl"
 	GLOWDERMA_ENV=staging VAULT_TOKEN='' timeout 15 "$vault" agent -config="$work/$role.hcl" >"$work/agent-$role.log" 2>&1 &
 done
@@ -115,6 +115,8 @@ assert all(d[k] == v for k, v in s3.items()), [k for k, v in s3.items() if d.get
 assert not ({'USE_S3', 'S3_LOCATION'} & set(d))
 \""
 check "datastores agent renders the 3 object storage files" "[ -s $d/object_storage_s3.json ] && [ -s $d/object_storage_admin_access_key ] && [ -s $d/object_storage_admin_secret_key ]"
+# (The test maps both agent volumes to one directory; on the server they are two volumes.)
+check "the object storage files go to their own volume, never next to the database passwords" "[ \"\$(grep -c 'destination *= \"/run/object-storage-secrets/object_storage_' $here/vault/agent/datastores.hcl)\" = 3 ] && ! grep -q 'destination *= \"/run/secrets/object_storage' $here/vault/agent/datastores.hcl"
 check "object_storage_s3.json has the admin, app and anonymous identities" "python3 -c \"
 import json
 j = json.load(open('$d/object_storage_s3.json'))
@@ -141,7 +143,7 @@ neg_case() { # <label> <env> <path to delete>
 	local label="$1" nenv="$2" gone="$3" nout="$work/neg-$1"
 	mkdir -p "$nout"
 	VAULT_TOKEN=root "$vault" kv metadata delete -mount=secret "$nenv/$gone" >/dev/null
-	sed -e "s#https://vault:8200#$VAULT_ADDR#" -e '/ca_cert/d' 		-e "s#/vault/approle#$work/rt-$nenv/vault/approle/datastores#g" 		-e "s#/vault/agent/templates#$here/vault/agent/templates#g" 		-e "s#/run/secrets#$nout#g" -e "s#/tmp/agent.pid#$work/neg-$label.pid#" 		"$here/vault/agent/datastores.hcl" >"$work/neg-$label.hcl"
+	sed -e "s#https://vault:8200#$VAULT_ADDR#" -e '/ca_cert/d' 		-e "s#/vault/approle#$work/rt-$nenv/vault/approle/datastores#g" 		-e "s#/vault/agent/templates#$here/vault/agent/templates#g" 		-e "s#/run/object-storage-secrets#$nout#g" -e "s#/run/secrets#$nout#g" -e "s#/tmp/agent.pid#$work/neg-$label.pid#" 		"$here/vault/agent/datastores.hcl" >"$work/neg-$label.hcl"
 	GLOWDERMA_ENV="$nenv" VAULT_TOKEN='' "$vault" agent -config="$work/neg-$label.hcl" >"$work/neg-$label.log" 2>&1 &
 	sleep 10
 	pkill -f "$work/neg-$label.hcl" 2>/dev/null || true

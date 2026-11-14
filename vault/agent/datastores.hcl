@@ -1,6 +1,8 @@
 # Vault Agent for the "datastores" consumers (compose/app.yaml service vault-agent-datastores).
 # Logs in with its own AppRole, reads only what policies/<env>/datastores.hcl allows, renders files into the
 # memory-only volume it shares (read-only) with its consumer. No token sink: the token never leaves this process.
+# Two volumes: /run/secrets (postgres, redis) and /run/object-storage-secrets (the object storage's s3.json and admin
+# keys), so the network-facing object storage never mounts the database passwords.
 pid_file = "/tmp/agent.pid"
 
 vault {
@@ -60,7 +62,7 @@ template {
 
 template {
   source               = "/vault/agent/templates/object_storage_s3.json.ctmpl"
-  destination          = "/run/secrets/object_storage_s3.json"
+  destination          = "/run/object-storage-secrets/object_storage_s3.json"
   perms                = "0400"
   backup               = false
   error_on_missing_key = true
@@ -68,7 +70,7 @@ template {
 
 template {
   source               = "/vault/agent/templates/object_storage_admin_access_key.ctmpl"
-  destination          = "/run/secrets/object_storage_admin_access_key"
+  destination          = "/run/object-storage-secrets/object_storage_admin_access_key"
   perms                = "0400"
   backup               = false
   error_on_missing_key = true
@@ -76,7 +78,7 @@ template {
 
 template {
   source               = "/vault/agent/templates/object_storage_admin_secret_key.ctmpl"
-  destination          = "/run/secrets/object_storage_admin_secret_key"
+  destination          = "/run/object-storage-secrets/object_storage_admin_secret_key"
   perms                = "0400"
   backup               = false
   error_on_missing_key = true

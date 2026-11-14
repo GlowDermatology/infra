@@ -179,6 +179,18 @@ for env in ("staging", "production"):
         }
         if len(set(buckets.values())) != 1 or None in buckets.values():
             err(f"{env}: the bucket name differs between: {buckets}")
+        # Only the S3 gateway may listen off-container: master, volume and filer have no authentication.
+        command = store.get("command") or []
+        for flag in ("-ip=127.0.0.1", "-ip.bind=127.0.0.1", "-s3.ip.bind=0.0.0.0", "-s3.port.iceberg=0", "-s3.port.lance=0"):
+            if flag not in command:
+                err(f"{env}/object-storage: command must contain {flag} (only the S3 gateway is reachable)")
+        if any(arg.startswith(("-ip.bind=0", "-ip=0", "-filer.ip", "-master.ip", "-volume.ip")) for arg in command):
+            err(f"{env}/object-storage: master, volume and filer must stay on 127.0.0.1")
+        # Their secrets volume holds the object storage's files only, never the database passwords.
+        for name in ("object-storage", "object-storage-init"):
+            sources = {str(v.get("source", "")) for v in app["services"][name].get("volumes") or []}
+            if "datastores-secrets" in sources or "object-storage-secrets" not in sources:
+                err(f"{env}/{name}: must mount object-storage-secrets, never datastores-secrets")
         for name in ("backend-api", "backend-worker", "backend-migrate", "backend-beat"):
             dep = (app["services"][name].get("depends_on") or {}).get("object-storage")
             if not dep or dep.get("required") is not False or dep.get("condition") != "service_healthy":
