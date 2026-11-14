@@ -24,6 +24,8 @@ secret/<env>/shared     Django + Next.js       INTERNAL_API_SECRET (Next receive
 secret/<env>/db-app     Django + Postgres      password  (role glowderma_app)
 secret/<env>/redis      Django + Redis         password
 secret/<env>/postgres   Postgres only          password  (superuser, never reaches Django)
+secret/<env>/s3         Django + object storage  media storage provider settings and the app key (keys = env var names)
+secret/<env>/object-storage  object storage only   OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID, OBJECT_STORAGE_ADMIN_SECRET_ACCESS_KEY
 ```
 
 Each value is stored once. The agent templates compose what each consumer needs, for example Django's
@@ -33,12 +35,28 @@ read of the other environment.
 
 | AppRole | Policy reads | Runs as | Renders |
 |---|---|---|---|
-| `<env>-backend` | django, shared, db-app, redis | 10001 | `django.json`, `fcm.json`, `apple.p8` |
+| `<env>-backend` | django, shared, db-app, redis, s3 | 10001 | `django.json`, `fcm.json`, `apple.p8` |
 | `<env>-frontend` | frontend, shared | 1000 | `frontend.json` |
-| `<env>-datastores` | postgres, db-app, redis | 999 | `postgres_*_password`, `redis.conf`, `redis_password` |
+| `<env>-datastores` | postgres, db-app, redis, object-storage, s3 | 999 | `postgres_*_password`, `redis.conf`, `redis_password`, `object_storage_s3.json`, `object_storage_admin_{access,secret}_key` |
 
 One agent serves all Django processes (api, worker, beat, migrate) because every Django process loads the
 full settings, Celery app included: a separate Celery identity would hold the same secrets.
+
+### Media storage (S3)
+
+`secret/<env>/s3` holds the provider settings (`S3_ENDPOINT_URL`, `S3_BUCKET_NAME`, `S3_REGION_NAME`,
+`S3_ADDRESSING_STYLE`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, optional `S3_VERIFY`, `PUBLIC_MEDIA_BASE_URL`);
+every key becomes an environment variable in `django.json`, like `secret/<env>/django`. The seeded values point
+at the stack's own SeaweedFS (`http://172.30.0.40:8333`, bucket `glowderma-media`); its `s3.json` identities file is
+rendered by the datastores agent from `s3` (the `app` pair) and `object-storage` (the `admin` pair).
+
+- Change provider or bucket: `vault kv patch secret/<env>/s3 ...`, then `scripts/restart.sh <env> backend` (no PR).
+  For an external provider also set `PUBLIC_MEDIA_BASE_URL` there.
+- The frontend's `GLOWDERMA_MEDIA_HOSTS` is build-time: a new image host still needs a frontend rebuild.
+- Never put `USE_S3` or `S3_LOCATION` in `secret/<env>/s3`: they are topology keys (`stack.env`) and the backend
+  refuses to start when the secrets file carries them.
+- Existing environments: rerun `scripts/vault/generate-app-secrets.sh <env>` before deploying this release (it only
+  creates the missing `s3` and `object-storage` paths).
 
 ### App settings live here too (overrides only)
 

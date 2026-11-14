@@ -57,3 +57,27 @@ template {
   backup               = false
   error_on_missing_key = true
 }
+
+template {
+  source               = "/vault/agent/templates/object_storage_s3.json.ctmpl"
+  destination          = "/run/secrets/object_storage_s3.json"
+  perms                = "0400"
+  backup               = false
+  error_on_missing_key = true
+}
+
+template {
+  source               = "/vault/agent/templates/object_storage_admin_access_key.ctmpl"
+  destination          = "/run/secrets/object_storage_admin_access_key"
+  perms                = "0400"
+  backup               = false
+  error_on_missing_key = true
+}
+
+template {
+  source               = "/vault/agent/templates/object_storage_admin_secret_key.ctmpl"
+  destination          = "/run/secrets/object_storage_admin_secret_key"
+  perms                = "0400"
+  backup               = false
+  error_on_missing_key = true
+}

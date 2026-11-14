@@ -32,9 +32,9 @@ done
 # read) is denied.
 allowed() {
 	case "$1:$2" in
-	backend:django | backend:shared | backend:db-app | backend:redis) return 0 ;;
+	backend:django | backend:shared | backend:db-app | backend:redis | backend:s3) return 0 ;;
 	frontend:frontend | frontend:shared) return 0 ;;
-	datastores:postgres | datastores:db-app | datastores:redis) return 0 ;;
+	datastores:postgres | datastores:db-app | datastores:redis | datastores:object-storage | datastores:s3) return 0 ;;
 	*) return 1 ;;
 	esac
 }
@@ -43,7 +43,7 @@ for env in staging production; do
 	for role in backend frontend datastores; do
 		dir="$work/rt-$env/vault/approle/$role"
 		token="$(VAULT_TOKEN=root "$vault" write -field=token auth/approle/login role_id="$(cat "$dir/role_id")" secret_id="$(cat "$dir/secret_id")")"
-		for path in django frontend shared db-app redis postgres; do
+		for path in django frontend shared db-app redis postgres s3 object-storage; do
 			if VAULT_TOKEN="$token" "$vault" kv get -mount=secret "$env/$path" >/dev/null 2>&1; then got=allow; else got=deny; fi
 			if allowed "$role" "$path"; then want=allow; else want=deny; fi
 			check "$env $role reads $env/$path: $want" "[ $got = $want ]"
@@ -54,11 +54,17 @@ for env in staging production; do
 	done
 done
 
+# generate-app-secrets.sh is idempotent: a second run keeps every existing value (checked on staging).
+snapshot() { for p in django s3 object-storage; do VAULT_TOKEN=root "$vault" kv get -format=json -mount=secret "staging/$p" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['data']['data'], sort_keys=True))"; done; }
+before="$(snapshot)"
+env GLOWDERMA_SKIP_ENV_GUARD=1 RUNTIME_DIR="$work/rt-staging" VAULT_LOCAL_BIN="$vault" VAULT_TOKEN=root 	"$here/scripts/vault/generate-app-secrets.sh" staging >/dev/null
+check "a second generate-app-secrets.sh run keeps existing values" "[ \"\$(snapshot)\" = \"\$before\" ]"
+
 # Real agents render every template.
 for role in backend frontend datastores; do
 	out="$work/out-$role"
 	mkdir -p "$out"
-	sed -e "s#https://vault:8200#$VAULT_ADDR#" -e '/ca_cert/d' \
+	sed -e "s#https://vault:8200#$VAULT_ADDR#" -e '/ca_cert/d' -e 's#static_secret_render_interval = "5m"#static_secret_render_interval = "2s"#' \
 		-e "s#/vault/approle#$work/rt-staging/vault/approle/$role#g" \
 		-e "s#/vault/agent/templates#$here/vault/agent/templates#g" \
 		-e "s#/run/secrets#$out#g" -e "s#/tmp/agent.pid#$work/$role.pid#" \
@@ -66,7 +72,12 @@ for role in backend frontend datastores; do
 	GLOWDERMA_ENV=staging VAULT_TOKEN='' timeout 15 "$vault" agent -config="$work/$role.hcl" >"$work/agent-$role.log" 2>&1 &
 done
 sleep 8
+# a key added later to secret/<env>/s3 reaches django.json at the next render (the test config shortens the
+# render interval from 5m to 2s; the templates are the real ones)
+VAULT_TOKEN=root "$vault" kv patch -mount=secret staging/s3 PUBLIC_MEDIA_BASE_URL=https://cdn.example.test/media/ >/dev/null
 b="$work/out-backend/django.json" f="$work/out-frontend/frontend.json" d="$work/out-datastores"
+for _ in $(seq 60); do grep -q PUBLIC_MEDIA_BASE_URL "$b" 2>/dev/null && break; sleep 0.5; done
+for p in s3 object-storage; do VAULT_TOKEN=root "$vault" kv get -format=json -mount=secret "staging/$p" >"$work/kv-$p.json"; done
 check "django.json is valid JSON with the required keys" "python3 -c \"
 import json; d = json.load(open('$b'))
 need = {'SECRET_KEY','JWT_SIGNING_KEYS','JWT_ACTIVE_KID','INTERNAL_API_SECRET','POSTGRES_PASSWORD','REDIS_URL',
@@ -82,7 +93,31 @@ check "Postgres app password = Django POSTGRES_PASSWORD" "python3 -c \"
 import json; assert json.load(open('$b'))['POSTGRES_PASSWORD'] == open('$d/postgres_app_password').read()
 \""
 check "Redis password in redis.conf and REDIS_URL" "grep -q \"^requirepass \$(cat $d/redis_password)\$\" $d/redis.conf && grep -q \"\$(cat $d/redis_password)@redis\" $b"
-check "rendered files are 0400" "[ \"\$(stat -c %a $b $f $d/redis.conf | sort -u)\" = 400 ]"
+check "django.json carries every key of secret/staging/s3 with its value, and no topology key" "python3 -c \"
+import json
+d = json.load(open('$b'))
+s3 = json.load(open('$work/kv-s3.json'))['data']['data']
+assert {'S3_ENDPOINT_URL','S3_BUCKET_NAME','S3_REGION_NAME','S3_ADDRESSING_STYLE','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY','PUBLIC_MEDIA_BASE_URL'} <= set(s3)
+assert all(d[k] == v for k, v in s3.items()), [k for k, v in s3.items() if d.get(k) != v]
+assert not ({'USE_S3', 'S3_LOCATION'} & set(d))
+\""
+check "datastores agent renders the 3 object storage files" "[ -s $d/object_storage_s3.json ] && [ -s $d/object_storage_admin_access_key ] && [ -s $d/object_storage_admin_secret_key ]"
+check "object_storage_s3.json has the admin, app and anonymous identities" "python3 -c \"
+import json
+j = json.load(open('$d/object_storage_s3.json'))
+s3 = json.load(open('$work/kv-s3.json'))['data']['data']
+adm = json.load(open('$work/kv-object-storage.json'))['data']['data']
+ids = {i['name']: i for i in j['identities']}
+assert list(ids) == ['admin', 'app', 'anonymous'], list(ids)
+assert ids['admin']['credentials'] == [{'accessKey': adm['OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID'], 'secretKey': adm['OBJECT_STORAGE_ADMIN_SECRET_ACCESS_KEY']}]
+assert ids['admin']['actions'] == ['Admin', 'Read', 'Write', 'List', 'Tagging']
+assert ids['app']['credentials'] == [{'accessKey': s3['S3_ACCESS_KEY_ID'], 'secretKey': s3['S3_SECRET_ACCESS_KEY']}]
+assert ids['app']['actions'] == ['Read:glowderma-media', 'Write:glowderma-media', 'List:glowderma-media', 'Tagging:glowderma-media']
+assert 'credentials' not in ids['anonymous'] and ids['anonymous']['actions'] == ['Read:glowderma-media']
+assert open('$d/object_storage_admin_access_key').read() == adm['OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID']
+assert open('$d/object_storage_admin_secret_key').read() == adm['OBJECT_STORAGE_ADMIN_SECRET_ACCESS_KEY']
+\""
+check "rendered files are 0400" "[ \"\$(stat -c %a $b $f $d/redis.conf $d/object_storage_s3.json $d/object_storage_admin_access_key $d/object_storage_admin_secret_key | sort -u)\" = 400 ]"
 check "no previous-render backups" "! ls $work/out-*/*.bak* >/dev/null 2>&1"
 pkill -f "$work/.*\.hcl" 2>/dev/null || true
 
