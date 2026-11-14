@@ -257,7 +257,11 @@ echo "==> Vault policies only grant read on their own environment"
 for env in staging production; do
 	other=$([ "$env" = staging ] && echo production || echo staging)
 	grep -q "secret/data/$other/" vault/policies/"$env"/*.hcl && fail "vault/policies/$env references $other"
-	grep -hE 'capabilities' vault/policies/"$env"/*.hcl | grep -vq '\["read"\]' && fail "vault/policies/$env grants more than read"
+	# The one exception: a token may revoke itself (scripts/lib.sh vault_kv, datastores role only).
+	grep -hE 'capabilities' vault/policies/"$env"/*.hcl | grep -vx 'path "auth/token/revoke-self" { capabilities = \["update"\] }' |
+		grep -vq '\["read"\]' && fail "vault/policies/$env grants more than read"
+	grep -l 'revoke-self' vault/policies/"$env"/*.hcl | grep -vqx "vault/policies/$env/datastores.hcl" &&
+		fail "vault/policies/$env: only the datastores role may revoke its own token"
 	grep -qE 'path "secret/(\*|data/\*)' vault/policies/"$env"/*.hcl && fail "vault/policies/$env grants a wildcard"
 done
 grep -q 'tls_skip_verify' -r vault/ && fail "tls_skip_verify must never appear"

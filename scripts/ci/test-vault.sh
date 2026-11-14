@@ -71,6 +71,9 @@ for env in staging production; do
 	check "$env datastores: preflight existence read of object-storage is allowed" 		"VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID $env/object-storage >/dev/null"
 	check "$env datastores: preflight field reads of s3 (endpoint) are allowed" 		"[ -n \"\$(VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=S3_ENDPOINT_URL $env/s3)\" ]"
 	check "$env datastores: metadata reads stay denied (why the preflight must not use them)" 		"! VAULT_TOKEN=$dtoken $vault kv metadata get -mount=secret $env/s3 >/dev/null 2>&1"
+	# vault_kv revokes its one-off login token right after the read.
+	check "$env datastores: the one-off token can revoke itself and is dead afterwards" \
+		"VAULT_TOKEN=$dtoken $vault token revoke -self >/dev/null && ! VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=S3_BUCKET_NAME $env/s3 >/dev/null 2>&1"
 done
 
 # Real agents render every template.

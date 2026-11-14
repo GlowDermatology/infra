@@ -94,8 +94,9 @@ local_value() {
 
 # vault_kv <vault kv args...>: `vault kv ...` as the datastores AppRole (it may read secret/<env>/s3 and
 # secret/<env>/object-storage). The deploy user cannot read the AppRole files, so this runs in a one-off container
-# of the datastores agent (no dependencies started; Vault must be unsealed). The token stays inside the container;
-# only what `vault kv` prints (a requested field) comes out; vault's errors (no secret values) stay on stderr.
+# of the datastores agent (no dependencies started; Vault must be unsealed). The token stays inside the container
+# and is revoked right after the read (never printed); only what `vault kv` prints (a requested field) comes out;
+# vault's errors (no secret values) stay on stderr.
 vault_kv() {
 	app_compose run --rm --no-deps -T --entrypoint sh vault-agent-datastores -c '
 		set -eu
@@ -103,7 +104,11 @@ vault_kv() {
 		VAULT_TOKEN="$(vault write -field=token auth/approle/login \
 			role_id=@/vault/approle/role_id secret_id=@/vault/approle/secret_id)"
 		export VAULT_TOKEN
-		exec vault kv "$@"' sh "$@"
+		rc=0
+		vault kv "$@" || rc=$?
+		vault token revoke -self >/dev/null 2>&1 ||
+			echo "vault_kv: revoking the one-off token failed (it expires with its TTL)" >&2
+		exit "$rc"' sh "$@"
 }
 
 # url_host <url>: the lower-case host of a URL (no scheme, credentials, port, path or trailing dot).
