@@ -80,6 +80,7 @@ class Upstream:
     down: bool = False  # True: drop every connection without an answer (the upstream is restarting)
     objects: dict[str, bytes] | None = None  # set: an object storage stub (path -> body), 404 for the rest
     port: int = 0
+    errors: dict[str, int] = field(default_factory=dict)  # object storage stub: path -> error status
 
     def paths(self) -> list[str]:
         with self.lock:
@@ -123,9 +124,10 @@ def stub_server(upstream: Upstream) -> ThreadingHTTPServer:
 
         def object_answer(self) -> None:
             """SeaweedFS: 200 with S3 headers for a stored object (the request path without its query), else 404."""
-            payload = (upstream.objects or {}).get(self.path.split("?", 1)[0])
+            key = self.path.split("?", 1)[0]
+            payload = (upstream.objects or {}).get(key)
             body = payload if payload is not None else b"<Error><Code>NoSuchKey</Code></Error>"
-            self.send_response(200 if payload is not None else 404)
+            self.send_response(upstream.errors.get(key, 200 if payload is not None else 404))
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Content-Type", "image/webp" if payload is not None else "application/xml")
             self.send_header("Server", "SeaweedFS S3")
@@ -458,6 +460,19 @@ def check_object_storage_media(probe: Probe, port: int, host: str, label: str, s
         storage.requests.clear()
     missing = request(port, host, "GET", "/media/products/1/missing.webp")
     probe.check(missing.status == 404, f"{label} storage: a missing object expected 404, got {missing.status}")
+    broken = request(port, host, "GET", "/media/products/1/boom.webp")
+    # An error answer is never cached for a week and carries no storage body or header.
+    for what, answer, status in (("missing object", missing, 404), ("storage 500", broken, 500)):
+        probe.check(answer.status == status, f"{label} storage: {what} expected {status}, got {answer.status}")
+        probe.check(
+            answer.values("Cache-Control") == ["no-store"],
+            f"{label} storage: {what} Cache-Control {answer.values('Cache-Control')}",
+        )
+        probe.check(b"Error" not in answer.body and b"NoSuchKey" not in answer.body, f"{label} storage: {what} body leaked")
+        probe.check(
+            not [k for k, _ in answer.all_headers if k.lower() == "server" or k.lower().startswith("x-amz-")],
+            f"{label} storage: {what} leaked storage headers",
+        )
     head = request(port, host, "HEAD", "/media/products/1/a.webp")
     probe.check(
         head.status == 200 and head.body == b"", f"{label} storage: HEAD expected 200 without a body, got {head.status}"
@@ -475,6 +490,10 @@ def check_object_storage_media(probe: Probe, port: int, host: str, label: str, s
         body = b"x" if method in ("POST", "PUT", "PATCH") else None
         refused = request(port, host, method, "/media/products/1/a.webp", body=body)
         probe.check(refused.status == 405, f"{label} storage: {method} /media/... expected 405, got {refused.status}")
+        probe.check(
+            refused.values("Cache-Control") == ["no-store"],
+            f"{label} storage: {method} 405 Cache-Control {refused.values('Cache-Control')}",
+        )
     probe.check(not storage.paths(), f"{label} storage: a write method reached the storage: {storage.paths()}")
 
     # Listings and traversal: the storage is never asked for anything outside /glowderma-media/media/<object>.
@@ -487,10 +506,18 @@ def check_object_storage_media(probe: Probe, port: int, host: str, label: str, s
     refused_paths = (
         "/media/", "/media/?list-type=2", "/media/products/", "/media//", "/media/products" + chr(92) + "..",
         "/media/a" + chr(92) + "b",
+        # Decoded characters that would become a query, a fragment, a NUL or a second decoding upstream.
+        "/media/products/1/a.webp%3Flist-type=2", "/media/products/1/a.webp%3Facl", "/media/products/1/a.webp%23x",
+        "/media/products/1/a.webp%00", "/media/%252e%252e/x", "/media/products/1/a.webp%253Facl",
+        "/media/products/%252e%252e/1/a.webp", "/media/products%252f..%252f1/a.webp",
     )
     for path in refused_paths:
         answer = request(port, host, "GET", path)
         probe.check(answer.status == 404, f"{label} storage: GET {path} expected 404, got {answer.status}")
+        probe.check(
+            answer.values("Cache-Control") == ["no-store"],
+            f"{label} storage: GET {path} 404 Cache-Control {answer.values('Cache-Control')}",
+        )
     escaping_paths = (
         "/media/../x", "/media/%2e%2e/x", "/media/%2E%2E/x", "/media/..%2fother-bucket/x",
         "/media/..%2Fother-bucket/x", "/media/products/../../x", "/media/a/%2e%2e%2f%2e%2e/other-bucket/x",
@@ -501,7 +528,12 @@ def check_object_storage_media(probe: Probe, port: int, host: str, label: str, s
     for path in escaping_paths:
         request(port, host, "GET", path)
     for path in storage.paths():
-        segments = unquote(path.split("?")[0]).replace("\\", "/").split("/")
+        # The raw request target the storage received: no query, no fragment, no NUL, no (double) encoded dot-dot.
+        segments = unquote(unquote(path.split("?")[0])).replace("\\", "/").split("/")
+        probe.check(
+            "#" not in path and "%00" not in path.lower() and "%3f" not in path.lower() and "%25" not in path.lower(),
+            f"{label} storage: the storage received a suspicious target {path!r}",
+        )
         probe.check(
             path.startswith(f"/{BUCKET}/media/") and ".." not in segments and "?" not in path and not path.endswith("/")
             and chr(92) not in unquote(path),
@@ -615,7 +647,9 @@ def run(caddy: str) -> Probe:
             probe.check(down.status == 502, f"Django down: expected 502, got {down.status}")
             request(port, site, "GET", f"/api/v1/customers/?q={SECRETS['down_phone']}")
             time.sleep(0.5)
-        storage = Upstream(objects={STORED_PATH: STORED_BODY})
+        storage = Upstream(
+            objects={STORED_PATH: STORED_BODY}, errors={f"/{BUCKET}/media/products/1/boom.webp": 500}
+        )
         storage_server = stub_server(storage)
         object_env = {
             "MEDIA_BACKEND": "object-storage",

@@ -85,20 +85,36 @@
 # dot-dot segment (raw or percent-encoded, which Caddy decodes before matching) or backslash are a 404 here, the query string
 # (?list-type=2, ?acl, ...) is dropped, and no credential or X-Amz-* request header is forwarded.
 (media_object-storage) {
-	@not_read not method GET HEAD
-	respond @not_read 405
-	@not_object path_regexp (/$|(^|/)\.\.(/|$)|[\\])
-	respond @not_object 404
-	rewrite * /{$OBJECT_STORAGE_BUCKET}/{$S3_LOCATION:media}{path}?
-	reverse_proxy {$OBJECT_STORAGE_UPSTREAM} {
-		header_up Host {upstream_hostport}
-		header_up -Authorization
-		header_up -X-Amz-*
-		header_down -Server
-		header_down -Cache-Control
-		header_down -Content-Security-Policy
-		header_down -X-Content-Type-Options
-		header_down -X-Amz-*
+	# A literal order (route): the guards look at the path as the client sent it, before the rewrite.
+	route {
+		@not_read not method GET HEAD
+		handle @not_read {
+			header >Cache-Control "no-store"
+			respond 405
+		}
+		@not_object path_regexp (/$|(^|/)\.\.(/|$)|[\\?#\x00%])
+		handle @not_object {
+			header >Cache-Control "no-store"
+			respond 404
+		}
+		rewrite * /{$OBJECT_STORAGE_BUCKET}/{$S3_LOCATION:media}{path}?
+		reverse_proxy {$OBJECT_STORAGE_UPSTREAM} {
+			header_up Host {upstream_hostport}
+			header_up -Authorization
+			header_up -X-Amz-*
+			header_down -Server
+			header_down -Cache-Control
+			header_down -Content-Security-Policy
+			header_down -X-Content-Type-Options
+			header_down -X-Amz-*
+			# An error answer (a missing object, a storage hiccup) is never cached for the week the objects are, and
+			# the storage's XML error body is not passed on.
+			@upstream_err status 4xx 5xx
+			handle_response @upstream_err {
+				header >Cache-Control "no-store"
+				respond "" {rp.status_code}
+			}
+		}
 	}
 }
 
