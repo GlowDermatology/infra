@@ -6,12 +6,14 @@
 #
 # What a deploy does, in order (any failure stops with a non-zero exit and diagnostics):
 #   1. guards: right server, both images published, Vault material present, Compose file valid
-#   2. Vault: started if not running (never recreated), must be unsealed
+#   2. Vault: started if not running (never recreated), must be unsealed; media settings in Vault checked
 #   3. pull every image by digest
 #   4. if the backend image changes: pre-deploy database dump, stop the writers, run migrations (one process)
+#      With OBJECT_STORAGE_ENABLED=true the object storage starts here and its bucket is created.
 #   5. `up -d` the whole stack and wait until every service is healthy
-#   6. reload Caddy (zero downtime), smoke test, record what is deployed, prune old images
+#   6. reload Caddy (zero downtime), smoke test, media_storage_check (USE_S3=true), record what is deployed, prune old images
 #
+# Needs Docker Compose >= 2.20 on the server (`depends_on ... required: false` for the optional object storage).
 # Never destructive: no `down`, no `-v`, no volume or network removal. Rolling back = deploying an older
 # image.env (promote workflow or `git revert`), plus a database restore if a migration has to be undone.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -68,10 +70,16 @@ case $vault_status in
 *) die "Vault does not answer: scripts/healthcheck.sh $ENV; docker logs glowderma-$ENV-vault-vault-1" ;;
 esac
 
+# Media settings: secret/<env>/s3 (and object-storage) present, an external provider fully configured.
+media_preflight
+
 # 3. pull ---------------------------------------------------------------------------------------------------
 log "Pulling images"
 app_compose pull --quiet --ignore-buildable
 app_compose --profile tools pull --quiet backend-migrate
+if [ "$(stack_value OBJECT_STORAGE_ENABLED)" = true ]; then
+	app_compose --profile object-storage-tools pull --quiet object-storage-init
+fi
 
 # 4. database migrations (only when the backend changes) ----------------------------------------------------
 mkdir -p "$RUNTIME_DIR/deployed"
@@ -81,6 +89,13 @@ previous_backend="$(cat "$RUNTIME_DIR/deployed/backend.digest" 2>/dev/null || tr
 log "Starting secrets and datastores"
 app_compose up -d --wait --wait-timeout 300 \
 	vault-agent-backend vault-agent-frontend vault-agent-datastores postgres redis
+
+if [ "$(stack_value OBJECT_STORAGE_ENABLED)" = true ]; then
+	log "Starting the object storage and creating the media bucket"
+	app_compose up -d --wait --wait-timeout 300 object-storage
+	app_compose --profile object-storage-tools run --rm --no-deps object-storage-init ||
+		die "object storage bucket setup failed (keys in secret/$ENV/object-storage; docker logs of the object-storage service)"
+fi
 
 if [ "$backend_digest" != "$previous_backend" ]; then
 	if [ -n "$previous_backend" ]; then
@@ -111,6 +126,16 @@ fi
 # 6. finish -------------------------------------------------------------------------------------------------
 app_compose exec -T edge caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 "$INFRA_DIR/scripts/healthcheck.sh" "$ENV"
+
+# Media in S3: Django must really use the bucket before this release counts as deployed.
+if [ "$(stack_value USE_S3)" = true ]; then
+	log "Checking the media storage"
+	if ! check_out="$(app_compose exec -T backend-api python manage.py media_storage_check 2>&1)"; then
+		echo "$check_out" >&2
+		die "media_storage_check failed: Django cannot use the bucket (secret/$ENV/s3). Roll back: docs/deployment.md"
+	fi
+	note "$check_out"
+fi
 
 printf '%s\n' "$backend_digest" >"$RUNTIME_DIR/deployed/backend.digest"
 image_value frontend DIGEST >"$RUNTIME_DIR/deployed/frontend.digest"

@@ -58,17 +58,82 @@ Pull requests run the security stages, the tests and a build without push.
   `scripts/restore-postgres.sh <env> <file>` (it asks for confirmation and makes a safety dump first).
 - The last three production images are kept in GHCR by the cleanup job, so they can always be redeployed.
 
+## Media storage: switching to S3
+
+Media (uploaded images) lives on disk (`runtime/media`) until `USE_S3=true`. Both switches are public values in
+`environments/<env>/stack.env`, changed by PR and deployed like any release. Do staging first, then production.
+Before the first deploy of this release on an existing server, run `scripts/vault/generate-app-secrets.sh <env>`
+(it creates only the missing `s3` and `object-storage` Vault paths).
+
+**The stack's own object storage (SeaweedFS), in this order:**
+
+1. Set `OBJECT_STORAGE_ENABLED=true` (keep `USE_S3=false`) and deploy. SeaweedFS starts and the bucket is created.
+   Django still uses the disk.
+2. Copy the existing files into the bucket: `scripts/manage.sh <env> sync-media` (dry run: lists what would be
+   copied), then `scripts/manage.sh <env> sync-media --apply`.
+3. Set `USE_S3=true` and deploy. `media_storage_check` gates this deploy: it fails the deploy when Django cannot
+   use the bucket. Then open a product image URL: it must answer 200.
+
+From then on the nightly backup mirrors the bucket ([disaster-recovery.md](disaster-recovery.md)).
+
+**An external provider, or a different bucket** (no PR):
+
+- `vault kv patch secret/<env>/s3` with `S3_ENDPOINT_URL`, `S3_BUCKET_NAME`, `S3_REGION_NAME`,
+  `S3_ADDRESSING_STYLE`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` and `PUBLIC_MEDIA_BASE_URL` (enter the secret
+  values through the Vault UI or `scripts/vault/put-secret.sh`, not on a command line), then
+  `scripts/restart.sh <env> backend`. `PUBLIC_MEDIA_BASE_URL` is required for a provider: with
+  `OBJECT_STORAGE_ENABLED=false` the deploy refuses without it.
+- If the image host changes, add it to the frontend's `GLOWDERMA_MEDIA_HOSTS` (below) and rebuild the frontend:
+  it is baked in at build time.
+- Copy the files into a new bucket before switching (`sync-media --apply` copies `runtime/media`; copy an old
+  bucket with the provider's tools).
+
+**Rotating the stack's own S3 keys.** `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` in `secret/<env>/s3` are also the
+`app` identity in SeaweedFS's `s3.json`, which the datastores agent renders. After `vault kv patch`: re-render
+(`scripts/manage.sh <env> restart vault-agent-datastores`), restart the object storage
+(`scripts/manage.sh <env> restart object-storage`), then `scripts/restart.sh <env> backend`. SeaweedFS hot-reloading
+`s3.json` is not verified here, so the restart is part of the procedure. Uploads fail between the second and third
+step. The admin pair in `secret/<env>/object-storage` is read fresh by the backup and the bucket setup, and by
+SeaweedFS at its next start.
+
+**Rollback to the disk.** Set `USE_S3=false` and deploy, but **first** copy the bucket back into `runtime/media`
+(`aws s3 sync`), otherwise every image uploaded while on S3 returns 404. For the stack's own storage, on the server
+(`media` is `S3_LOCATION` in `stack.env`; the admin keys are read from the rendered secret files, never typed):
+
+```bash
+scripts/manage.sh <env> --profile object-storage-tools run --rm --no-deps -T --entrypoint sh object-storage-init -c '
+  export AWS_ACCESS_KEY_ID="$(cat /run/secrets/object_storage_admin_access_key)" \
+         AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/object_storage_admin_secret_key)" AWS_DEFAULT_REGION=us-east-1
+  aws --endpoint-url http://object-storage:8333 s3 sync s3://glowderma-media/media /mirror'
+sudo rsync -a /opt/glowderma/runtime/media-mirror/ /opt/glowderma/runtime/media/
+sudo chown -R 10001:10001 /opt/glowderma/runtime/media
+```
+
+With an external provider, `aws s3 sync` from that provider (its endpoint and keys) into
+`/opt/glowderma/runtime/media`, owned by 10001. Then set `USE_S3=false` and deploy.
+
 ## What `scripts/deploy.sh` does on the server
 
 1. Refuses if the server is a different environment (`/etc/glowderma/environment`).
 2. Exits without doing anything if an app has no image yet (first days of a new environment).
 3. Checks the Vault TLS and AppRole files exist and the Compose file resolves.
 4. Starts Vault if it is stopped (never recreates it) and refuses to continue while it is sealed.
-5. Pulls every image by digest.
-6. If the backend image changes: dumps the database, stops api/worker/beat, runs `backend-migrate` alone.
-7. `up -d --remove-orphans --wait`: every service healthy within 10 minutes, or it prints `ps` and the last
+5. Media preflight: with `OBJECT_STORAGE_ENABLED=true` or `USE_S3=true`, `secret/<env>/s3` (and, with the object
+   storage, `secret/<env>/object-storage`) must exist, or it stops with `run scripts/vault/generate-app-secrets.sh
+   <env> first`. With `USE_S3=true` and `OBJECT_STORAGE_ENABLED=false` (an external provider) it also refuses an
+   endpoint that points at the stack's own `object-storage` and a missing `PUBLIC_MEDIA_BASE_URL`. Messages name
+   keys, never values.
+6. Pulls every image by digest (and the bucket-setup image when the object storage is enabled).
+7. Starts the secrets agents, postgres and redis; with `OBJECT_STORAGE_ENABLED=true` it also starts
+   `object-storage` and runs the one-shot `object-storage-init` (creates the bucket, idempotent).
+8. If the backend image changes: dumps the database, stops api/worker/beat, runs `backend-migrate` alone.
+9. `up -d --remove-orphans --wait`: every service healthy within 10 minutes, or it prints `ps` and the last
    log lines and fails.
-8. Reloads Caddy, runs `scripts/healthcheck.sh`, records the release in `runtime/deployed/history.log`.
+10. Reloads Caddy, runs `scripts/healthcheck.sh`; with `USE_S3=true` runs `manage.py media_storage_check` and
+    fails the deploy with its output; records the release in `runtime/deployed/history.log`.
+
+The server needs **Docker Compose v2.20 or newer** (`depends_on ... required: false` makes the object storage
+optional). `docker compose version` shows it. `deploy.sh` does not check the version itself.
 
 The SSH session takes a lock (`runtime/deploy.lock`): two deploys never overlap.
 
