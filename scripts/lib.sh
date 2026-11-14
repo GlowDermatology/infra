@@ -85,7 +85,7 @@ local_value() {
 # vault_kv <vault kv args...>: `vault kv ...` as the datastores AppRole (it may read secret/<env>/s3 and
 # secret/<env>/object-storage). The deploy user cannot read the AppRole files, so this runs in a one-off container
 # of the datastores agent (no dependencies started; Vault must be unsealed). The token stays inside the container;
-# only what `vault kv` prints (a requested field) comes out, errors are discarded.
+# only what `vault kv` prints (a requested field) comes out; vault's errors (no secret values) stay on stderr.
 vault_kv() {
 	app_compose run --rm --no-deps -T --entrypoint sh vault-agent-datastores -c '
 		set -eu
@@ -93,7 +93,7 @@ vault_kv() {
 		VAULT_TOKEN="$(vault write -field=token auth/approle/login \
 			role_id=@/vault/approle/role_id secret_id=@/vault/approle/secret_id)"
 		export VAULT_TOKEN
-		exec vault kv "$@"' sh "$@" 2>/dev/null
+		exec vault kv "$@"' sh "$@"
 }
 
 # url_host <url>: the lower-case host of a URL (no scheme, credentials, port, path or trailing dot).
@@ -106,25 +106,37 @@ url_host() {
 	printf '%s' "$rest" | tr '[:upper:]' '[:lower:]'
 }
 
+# secret_must_exist <path below secret/<env>/> <field that always exists>: dies unless the secret is readable by the
+# datastores role. Reads the field through the data path (the only one its policy grants), never printing it.
+# Vault exits 2 for every API error (404 and 403 alike), so only its "No value found" message means "missing";
+# anything else (compose, image pull, login denied, sealed Vault) is reported as a failed read.
+secret_must_exist() {
+	local rc=0 err
+	err="$(vault_kv get -mount=secret -field="$2" "$ENV/$1" 2>&1 >/dev/null)" || rc=$?
+	[ "$rc" -ne 0 ] || return 0
+	case "$err" in
+	*"No value found"*) die "secret/$ENV/$1 is missing: run scripts/vault/generate-app-secrets.sh $ENV first" ;;
+	esac
+	echo "$err" >&2
+	die "reading secret/$ENV/$1 from Vault failed (exit $rc)"
+}
+
 # media_preflight: refuses a deploy whose media settings cannot work. Messages name keys, never values.
 #   OBJECT_STORAGE_ENABLED or USE_S3 true  -> secret/<env>/s3 must exist (and secret/<env>/object-storage with the
 #                                             object storage)
 #   USE_S3 true, object storage off        -> an external provider: its endpoint must not be the stack's own
 #                                             (host `object-storage`) and PUBLIC_MEDIA_BASE_URL must be set
 media_preflight() {
-	local storage use_s3 fix endpoint public
+	local storage use_s3 endpoint public
 	storage="$(stack_value OBJECT_STORAGE_ENABLED)"
 	use_s3="$(stack_value USE_S3)"
 	[ "$storage" = true ] || [ "$use_s3" = true ] || return 0
-	fix="run scripts/vault/generate-app-secrets.sh $ENV first"
-	vault_kv metadata get -mount=secret "$ENV/s3" >/dev/null || die "secret/$ENV/s3 is missing: $fix"
-	if [ "$storage" = true ]; then
-		vault_kv metadata get -mount=secret "$ENV/object-storage" >/dev/null ||
-			die "secret/$ENV/object-storage is missing: $fix"
-	fi
+	secret_must_exist s3 S3_BUCKET_NAME
+	[ "$storage" != true ] || secret_must_exist object-storage OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID
 	if [ "$use_s3" = true ] && [ "$storage" != true ]; then
-		endpoint="$(vault_kv get -mount=secret -field=S3_ENDPOINT_URL "$ENV/s3" || true)"
-		public="$(vault_kv get -mount=secret -field=PUBLIC_MEDIA_BASE_URL "$ENV/s3" || true)"
+		# The secret was just read successfully, so a failing field read here means the optional key is not set.
+		endpoint="$(vault_kv get -mount=secret -field=S3_ENDPOINT_URL "$ENV/s3" 2>/dev/null || true)"
+		public="$(vault_kv get -mount=secret -field=PUBLIC_MEDIA_BASE_URL "$ENV/s3" 2>/dev/null || true)"
 		[ "$(url_host "$endpoint")" != object-storage ] ||
 			die "USE_S3 points at the stack's object storage but OBJECT_STORAGE_ENABLED=false"
 		[ -n "$public" ] || die "an external provider needs PUBLIC_MEDIA_BASE_URL in secret/$ENV/s3"

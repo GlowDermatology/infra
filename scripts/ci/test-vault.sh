@@ -62,6 +62,17 @@ same=0
 [ "$(snapshot)" = "$before" ] && same=1
 check "a second generate-app-secrets.sh run keeps existing values" "[ $same = 1 ]"
 
+# media_preflight (scripts/lib.sh) reads these exact commands as the datastores role: they must be allowed on both
+# paths (the policy grants the data path only, never metadata).
+for env in staging production; do
+	dir="$work/rt-$env/vault/approle/datastores"
+	dtoken="$(VAULT_TOKEN=root "$vault" write -field=token auth/approle/login role_id="$(cat "$dir/role_id")" secret_id="$(cat "$dir/secret_id")")"
+	check "$env datastores: preflight existence read of s3 (S3_BUCKET_NAME) is allowed" 		"VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=S3_BUCKET_NAME $env/s3 >/dev/null"
+	check "$env datastores: preflight existence read of object-storage is allowed" 		"VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID $env/object-storage >/dev/null"
+	check "$env datastores: preflight field reads of s3 (endpoint) are allowed" 		"[ -n \"\$(VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=S3_ENDPOINT_URL $env/s3)\" ]"
+	check "$env datastores: metadata reads stay denied (why the preflight must not use them)" 		"! VAULT_TOKEN=$dtoken $vault kv metadata get -mount=secret $env/s3 >/dev/null 2>&1"
+done
+
 # Real agents render every template.
 for role in backend frontend datastores; do
 	out="$work/out-$role"
@@ -146,6 +157,19 @@ for n in ('object_storage_s3.json', 'object_storage_admin_access_key', 'object_s
 }
 neg_case missing-object-storage production object-storage
 neg_case missing-s3 staging s3
+
+# What media_preflight keys on for "the secret does not exist" (neg_case deleted staging/s3 above): vault exits 2 and
+# prints "No value found". A denied read also exits 2 (Vault uses 2 for every API error), so the message is the key.
+dir="$work/rt-staging/vault/approle/datastores"
+dtoken="$(VAULT_TOKEN=root "$vault" write -field=token auth/approle/login role_id="$(cat "$dir/role_id")" secret_id="$(cat "$dir/secret_id")")"
+rc=0
+# shellcheck disable=SC2034 # err is read inside the eval of check
+err="$(VAULT_TOKEN=$dtoken "$vault" kv get -mount=secret -field=S3_BUCKET_NAME staging/s3 2>&1 >/dev/null)" || rc=$?
+check "a missing secret reads as exit 2 + 'No value found' (got exit $rc)" "[ $rc = 2 ] && [[ \"\$err\" == *'No value found'* ]]"
+rc=0
+# shellcheck disable=SC2034 # err is read inside the eval of check
+err="$(VAULT_TOKEN=$dtoken "$vault" kv get -mount=secret -field=X staging/django 2>&1 >/dev/null)" || rc=$?
+check "a denied path is exit 2 WITHOUT 'No value found' (not mistaken for missing)" "[ $rc = 2 ] && [[ \"\$err\" != *'No value found'* ]]"
 
 echo
 [ "$failures" -eq 0 ] || { echo "$failures Vault check(s) failed"; exit 1; }

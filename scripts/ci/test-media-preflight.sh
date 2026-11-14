@@ -17,14 +17,21 @@ export ENV_DIR
 SECRET_ENDPOINT_MARK=endpoint-mark-7f3a
 SECRET_PUBLIC_MARK=public-mark-91bc
 
-# The stub reads what the case sets: STUB_S3 / STUB_OS (present|missing), STUB_ENDPOINT, STUB_PUBLIC.
+# The stub answers the exact commands media_preflight runs (scripts/ci/test-vault.sh runs the same ones against a
+# real Vault). STUB_S3 / STUB_OS: present | missing (exit 2 + vault's "No value found") | error (exit 2, another message).
 vault_kv() {
+	local state
 	case "$*" in
-	"metadata get -mount=secret staging/s3") [ "$STUB_S3" = present ] ;;
-	"metadata get -mount=secret staging/object-storage") [ "$STUB_OS" = present ] ;;
-	"get -mount=secret -field=S3_ENDPOINT_URL staging/s3") printf '%s' "$STUB_ENDPOINT" ;;
-	"get -mount=secret -field=PUBLIC_MEDIA_BASE_URL staging/s3") [ -n "$STUB_PUBLIC" ] && printf '%s' "$STUB_PUBLIC" ;;
-	*) echo "unexpected vault_kv call" >&2 && return 1 ;;
+	"get -mount=secret -field=S3_BUCKET_NAME staging/s3") state="$STUB_S3" ;;
+	"get -mount=secret -field=OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID staging/object-storage") state="$STUB_OS" ;;
+	"get -mount=secret -field=S3_ENDPOINT_URL staging/s3") printf '%s' "$STUB_ENDPOINT"; return 0 ;;
+	"get -mount=secret -field=PUBLIC_MEDIA_BASE_URL staging/s3") [ -n "$STUB_PUBLIC" ] && printf '%s' "$STUB_PUBLIC"; return 0 ;;
+	*) echo "unexpected vault_kv call: $*" >&2; return 1 ;;
+	esac
+	case "$state" in
+	present) printf 'value-never-printed' ;;
+	missing) echo "No value found at secret/data/staging/x" >&2; return 2 ;;
+	*) echo "Error making API request: permission denied" >&2; return 2 ;;
 	esac
 }
 
@@ -65,6 +72,9 @@ FIX="run scripts/vault/generate-app-secrets.sh staging first"
 
 # Both off: Vault is not even asked.
 run_case "both off: nothing to check" false false missing missing "" "" ok
+# A failing Vault read is not "missing".
+run_case "object storage, Vault read fails" true false error present "" "" fail "reading secret/staging/s3 from Vault failed"
+run_case "object storage, object-storage read fails" true false present error "" "" fail "reading secret/staging/object-storage from Vault failed"
 # Object storage on.
 run_case "object storage, s3 missing" true false missing present "" "" fail "$FIX"
 run_case "object storage, object-storage missing" true false present missing "" "" fail "$FIX"
