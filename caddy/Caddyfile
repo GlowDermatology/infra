@@ -3,7 +3,7 @@
 #
 #   SITE_DOMAIN       one origin for everything users see:
 #                       /api/v1/*   Django (customer API, provider webhooks, POS, health)
-#                       /media/*    uploaded files from the media directory
+#                       /media/*    uploaded files, from the media directory or the object storage (MEDIA_BACKEND)
 #                       everything else, including /admin and Next's own /api/shop/* and /api/revalidate: Next.js
 #   www.SITE_DOMAIN   redirects to SITE_DOMAIN
 #   OPS_DOMAIN        Django ops console (/django-admin/ + its /static/), only for OPS_ALLOWED_IPS (space separated);
@@ -72,18 +72,47 @@
 	}
 }
 
+# Public /media/* is served from the media directory (MEDIA_BACKEND=disk, the default) or fetched from the stack's
+# SeaweedFS (MEDIA_BACKEND=object-storage). Both run inside `handle_path /media/*`, so {path} is what follows
+# /media. The public URLs are the same in both modes.
+(media_disk) {
+	root * {$MEDIA_ROOT:/srv/media}
+	file_server
+}
+
+# SeaweedFS grants anonymous GET on the whole bucket, so this layer confines every request to
+# /<bucket>/<S3_LOCATION>/...: only GET and HEAD go upstream, a directory-like path (a bucket listing) and any
+# dot-dot segment (raw or percent-encoded, which Caddy decodes before matching) or backslash are a 404 here, the query string
+# (?list-type=2, ?acl, ...) is dropped, and no credential or X-Amz-* request header is forwarded.
+(media_object-storage) {
+	@not_read not method GET HEAD
+	respond @not_read 405
+	@not_object path_regexp (/$|(^|/)\.\.(/|$)|[\\])
+	respond @not_object 404
+	rewrite * /{$OBJECT_STORAGE_BUCKET}/{$S3_LOCATION:media}{path}?
+	reverse_proxy {$OBJECT_STORAGE_UPSTREAM} {
+		header_up Host {upstream_hostport}
+		header_up -Authorization
+		header_up -X-Amz-*
+		header_down -Server
+		header_down -Cache-Control
+		header_down -Content-Security-Policy
+		header_down -X-Content-Type-Options
+		header_down -X-Amz-*
+	}
+}
+
 {$SITE_DOMAIN} {
 	import common
 
 	# Uploaded media, re-encoded by Django and stored under content-hashed names.
 	handle_path /media/* {
-		root * {$MEDIA_ROOT:/srv/media}
 		header {
 			Cache-Control "public, max-age=604800"
 			X-Content-Type-Options nosniff
 			Content-Security-Policy "default-src 'none'; img-src 'self'; sandbox"
 		}
-		file_server
+		import media_{$MEDIA_BACKEND:disk}
 	}
 
 	# Staff-only Django surfaces stay private: the Next server calls 172.30.0.30:8000 directly. Django refuses them
@@ -151,9 +180,8 @@ www.{$SITE_DOMAIN} {
 		@root path /
 		redir @root /django-admin/ 302
 		handle_path /media/* {
-			root * {$MEDIA_ROOT:/srv/media}
 			header Cache-Control "public, max-age=604800"
-			file_server
+			import media_{$MEDIA_BACKEND:disk}
 		}
 		@console path /django-admin /django-admin/* /static/*
 		reverse_proxy @console {$API_UPSTREAM:172.30.0.30:8000} {
