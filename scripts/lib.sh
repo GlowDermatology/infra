@@ -35,14 +35,28 @@ use_env() {
 	export ENV ENV_DIR
 }
 
+# media_backend: where Caddy serves /media from. `object-storage` only when the stack runs SeaweedFS AND Django
+# stores media in S3; otherwise `disk` (an external S3 provider is public through its own URL).
+media_backend() {
+	if [ "$(stack_value OBJECT_STORAGE_ENABLED)" = true ] && [ "$(stack_value USE_S3)" = true ]; then
+		echo object-storage
+	else
+		echo disk
+	fi
+}
+
 # app_compose <compose args...>: the application project of $ENV, with every env file in the right order.
+# Exports MEDIA_BACKEND and adds the object-storage profile when OBJECT_STORAGE_ENABLED=true.
 app_compose() {
+	MEDIA_BACKEND="$(media_backend)"
+	export MEDIA_BACKEND
 	local args=(-p "glowderma-$ENV" -f "$INFRA_DIR/compose/app.yaml"
 		--env-file "$ENV_DIR/stack.env"
 		--env-file "$ENV_DIR/backend/image.env"
 		--env-file "$ENV_DIR/frontend/image.env")
 	# Host-local, private-but-not-secret values (OPS_ALLOWED_IPS, backup settings). Optional.
 	[ -f "$RUNTIME_DIR/local.env" ] && args+=(--env-file "$RUNTIME_DIR/local.env")
+	[ "$(stack_value OBJECT_STORAGE_ENABLED)" = true ] && args+=(--profile object-storage)
 	docker compose "${args[@]}" "$@"
 }
 

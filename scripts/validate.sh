@@ -24,11 +24,25 @@ EOF
 printf 'OPS_ALLOWED_IPS=192.0.2.10/32 198.51.100.0/24\n' >"$work/local.env"
 
 echo "==> Compose files resolve for both environments"
+# shellcheck source=lib.sh
+. scripts/lib.sh
 for env in staging production; do
 	d="environments/$env"
-	RUNTIME_DIR=/opt/glowderma/runtime docker compose -f compose/app.yaml --env-file "$d/stack.env" \
-		--env-file "$d/backend/image.env" --env-file "$d/frontend/image.env" --env-file "$work/images.env" \
-		--env-file "$work/local.env" config --format json >"$work/app-$env.json" || fail "compose/app.yaml ($env)"
+	# MEDIA_BACKEND is computed by lib.sh (app_compose) in real use; compute it the same way here.
+	MEDIA_BACKEND="$(ENV_DIR="$d" media_backend)"
+	export MEDIA_BACKEND
+	# Three renders: the default stack, with the optional object storage, and with every profile (tools too).
+	for variant in base os os-tools; do
+		case "$variant" in
+		base) profiles=() ;;
+		os) profiles=(--profile object-storage) ;;
+		os-tools) profiles=(--profile tools --profile object-storage --profile object-storage-tools) ;;
+		esac
+		RUNTIME_DIR=/opt/glowderma/runtime docker compose -f compose/app.yaml --env-file "$d/stack.env" \
+			--env-file "$d/backend/image.env" --env-file "$d/frontend/image.env" --env-file "$work/images.env" \
+			--env-file "$work/local.env" "${profiles[@]}" config --format json >"$work/app-$env-$variant.json" ||
+			fail "compose/app.yaml ($env, $variant)"
+	done
 	docker compose -f compose/vault.yaml --env-file "$d/stack.env" config --format json >"$work/vault-$env.json" ||
 		fail "compose/vault.yaml ($env)"
 	# An unpublished image must be refused, never silently replaced by a mutable tag.
@@ -50,7 +64,25 @@ def err(msg): errors.append(msg)
 
 names = {}
 for env in ("staging", "production"):
-    app = json.loads((work / f"app-{env}.json").read_text())
+    # stack.env values the object storage rules compare against.
+    stack = {}
+    for line in Path(f"environments/{env}/stack.env").read_text().splitlines():
+        if line and not line.startswith("#") and "=" in line:
+            k, _, v = line.partition("=")
+            stack[k] = v
+    for key in ("OBJECT_STORAGE_ENABLED", "USE_S3"):
+        if stack.get(key) not in ("true", "false"):
+            err(f"{env}: {key} in stack.env must be true or false")
+    if not stack.get("S3_LOCATION"):
+        err(f"{env}: S3_LOCATION in stack.env must not be empty")
+    try:
+        base = json.loads((work / f"app-{env}-base.json").read_text())
+        with_os = json.loads((work / f"app-{env}-os.json").read_text())
+        # Every service of every profile goes through the generic rules below.
+        app = json.loads((work / f"app-{env}-os-tools.json").read_text())
+    except json.JSONDecodeError:
+        err(f"{env}: compose/app.yaml did not render (see the compose error above); structural rules skipped")
+        continue
     vault = json.loads((work / f"vault-{env}.json").read_text())
     names[env] = (app["name"], vault["name"])
     if app["name"] != f"glowderma-{env}" or vault["name"] != f"glowderma-{env}-vault":
@@ -108,6 +140,55 @@ for env in ("staging", "production"):
     ops = edge_env.get("OPS_ALLOWED_IPS", "")
     if "," in ops:
         err(f"{env}: OPS_ALLOWED_IPS must be space separated (Caddy and Django both split on spaces)")
+    # ---- Optional object storage (SeaweedFS). Vault-dependent consistency rules live in scripts/deploy.sh.
+    for name in ("object-storage", "object-storage-init"):
+        if name in base["services"]:
+            err(f"{env}: {name} is in the default render; it must be behind its profile")
+    if "object-storage-init" in with_os["services"]:
+        err(f"{env}: object-storage-init must be behind the object-storage-tools profile, never started by up")
+    missing = [n for n in ("object-storage", "object-storage-init") if n not in app["services"]]
+    if missing:
+        err(f"{env}: services missing from the render with the object-storage profiles: {missing}")
+    else:
+        store = app["services"]["object-storage"]
+        init = app["services"]["object-storage-init"]
+        store_ip = (store.get("networks", {}).get("front") or {}).get("ipv4_address")
+        if "back" not in store.get("networks", {}):
+            err(f"{env}/object-storage: must also be on the 'back' network (workers and init reach it there)")
+        seeded = Path("scripts/vault/generate-app-secrets.sh").read_text()
+        seeded_url = re.search(r'"S3_ENDPOINT_URL":"http://([0-9.]+):8333"', seeded)
+        seeded_bucket = re.search(r'"S3_BUCKET_NAME":"([^"]+)"', seeded)
+        edge_env_os = app["services"]["edge"]["environment"]
+        upstream = edge_env_os.get("OBJECT_STORAGE_UPSTREAM", "")
+        addresses = {
+            "object-storage ipv4_address": store_ip,
+            "edge OBJECT_STORAGE_UPSTREAM": upstream.rsplit(":", 1)[0] if upstream else None,
+            "seeded S3_ENDPOINT_URL (scripts/vault/generate-app-secrets.sh)": seeded_url and seeded_url.group(1),
+        }
+        if len(set(addresses.values())) != 1 or None in addresses.values():
+            err(f"{env}: the object storage address differs between: {addresses}")
+        if upstream and not upstream.endswith(":8333"):
+            err(f"{env}: edge OBJECT_STORAGE_UPSTREAM must point at the S3 port 8333")
+        buckets = {
+            "edge OBJECT_STORAGE_BUCKET": edge_env_os.get("OBJECT_STORAGE_BUCKET"),
+            "object-storage-init OBJECT_STORAGE_BUCKET": init.get("environment", {}).get("OBJECT_STORAGE_BUCKET"),
+            "seeded S3_BUCKET_NAME (scripts/vault/generate-app-secrets.sh)": seeded_bucket and seeded_bucket.group(1),
+        }
+        if len(set(buckets.values())) != 1 or None in buckets.values():
+            err(f"{env}: the bucket name differs between: {buckets}")
+        for name in ("backend-api", "backend-worker", "backend-migrate", "backend-beat"):
+            dep = (app["services"][name].get("depends_on") or {}).get("object-storage")
+            if not dep or dep.get("required") is not False or dep.get("condition") != "service_healthy":
+                err(f"{env}/{name}: must depend on object-storage (service_healthy, required: false)")
+    for service in ("edge", "backend-api", "backend-worker", "backend-migrate", "backend-beat"):
+        senv = app["services"][service]["environment"]
+        if senv.get("S3_LOCATION") != stack.get("S3_LOCATION"):
+            err(f"{env}/{service}: S3_LOCATION does not match stack.env")
+        if service != "edge" and senv.get("USE_S3") != stack.get("USE_S3"):
+            err(f"{env}/{service}: USE_S3 does not match stack.env")
+    wanted = "object-storage" if stack.get("OBJECT_STORAGE_ENABLED") == stack.get("USE_S3") == "true" else "disk"
+    if app["services"]["edge"]["environment"].get("MEDIA_BACKEND") != wanted:
+        err(f"{env}/edge: MEDIA_BACKEND must be {wanted} for OBJECT_STORAGE_ENABLED/USE_S3 in stack.env")
     # No application container may receive a Vault token or AppRole credentials.
     for name, svc in app["services"].items():
         if name.startswith("vault-agent"):
@@ -119,7 +200,7 @@ for env in ("staging", "production"):
             if "approle" in str(volume.get("source", "")):
                 err(f"{env}/{name}: AppRole material mounted into an application container")
 
-if names["staging"] == names["production"]:
+if len(names) == 2 and names["staging"] == names["production"]:
     err("staging and production must have different project names")
 
 # Env files are public: nothing that looks like a secret value.

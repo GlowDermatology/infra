@@ -61,6 +61,9 @@ x-backend: &backend
     OPS_DOMAIN: ${OPS_DOMAIN}
     OPS_ADMIN_ALLOWED_NETS: ${OPS_ALLOWED_IPS:-127.0.0.1/32}
     PUBLIC_MEDIA_BASE_URL: https://${SITE_DOMAIN}/media/
+    # Media storage: disk or S3 (stack.env). Provider, bucket, endpoint and keys come from Vault (secret/<env>/s3).
+    USE_S3: ${USE_S3:?USE_S3 missing (environments/<env>/stack.env)}
+    S3_LOCATION: ${S3_LOCATION:?S3_LOCATION missing (environments/<env>/stack.env)}
     PAYMENT_RETURN_URL: https://${SITE_DOMAIN}/pay/return
     PAYMENT_WEB_RETURN_URL: https://${SITE_DOMAIN}{locale_prefix}/buyurtmalar/{order_id}?paid=1
     GOOGLE_OAUTH_REDIRECT_URI: https://${SITE_DOMAIN}/admin/auth/oauth/google/callback
@@ -75,6 +78,7 @@ x-backend: &backend
     vault-agent-backend: {condition: service_healthy}
     postgres: {condition: service_healthy}
     redis: {condition: service_healthy}
+    object-storage: {condition: service_healthy, required: false}
 
 services:
   # ---------------------------------------------------------------- secrets (Vault Agent sidecars)
@@ -193,6 +197,70 @@ services:
       retries: 20
       start_period: 60s
 
+  # ---------------------------------------------------------------- object storage (optional)
+  # Self-hosted S3 (SeaweedFS), only when OBJECT_STORAGE_ENABLED=true (scripts/lib.sh adds the profile). Identities
+  # come from the s3.json that vault-agent-datastores renders (admin, app, anonymous read of the media bucket).
+  # No published ports: the edge (media GET) and the backend (S3 API) reach it at 172.30.0.40:8333.
+  object-storage:
+    <<: *hardened
+    profiles: ["object-storage"]
+    image: chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0
+    # The image runs as root by default and its entrypoint then chowns /data and drops to uid 1000. As 999 (the
+    # datastores agent's UID, which owns the 0400 secret files) it skips that step, so ${RUNTIME_DIR}/object-storage
+    # must be owned by 999:999 (bootstrap-server.sh). Waits for the agent's file like postgres and redis do.
+    user: "999:999"
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        until [ -s /run/secrets/object_storage_s3.json ]; do echo 'waiting for Vault secrets'; sleep 3; done;
+        exec /entrypoint.sh "$$@"
+      - sh
+    command: server -dir=/data -s3 -s3.config=/run/secrets/object_storage_s3.json -ip.bind=0.0.0.0
+    volumes:
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/object-storage:/data
+      - datastores-secrets:/run/secrets:ro
+    # The server keeps its gRPC unix sockets in /tmp.
+    tmpfs: ["/tmp"]
+    networks:
+      front: {ipv4_address: 172.30.0.40}
+      back: {}
+    mem_limit: ${OBJECT_STORAGE_MEM_LIMIT:-512m}
+    pids_limit: 512
+    stop_grace_period: 30s
+    depends_on:
+      vault-agent-datastores: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-s", "-o", "/dev/null", "http://127.0.0.1:8333/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  # One-shot (profile "object-storage-tools"): creates the media bucket, idempotent. Run by scripts/deploy.sh with
+  # `run --rm`, never `up`. On "front" because the object storage is addressed by its front IPv4 literal.
+  object-storage-init:
+    <<: *hardened
+    profiles: ["object-storage-tools"]
+    image: amazon/aws-cli:2.40.3@sha256:33a16c53ea442e918b58df67301ad76a8fb57082c39f7e78753b898c3f3e87c2
+    user: "999:999"
+    restart: "no"
+    entrypoint: ["/bin/sh", "/init/init.sh"]
+    environment:
+      OBJECT_STORAGE_BUCKET: glowderma-media
+      OBJECT_STORAGE_ENDPOINT: http://172.30.0.40:8333
+      HOME: /tmp
+    volumes:
+      - ../object-storage:/init:ro
+      - datastores-secrets:/run/secrets:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media-mirror:/mirror
+    tmpfs: ["/tmp"]
+    networks: [front]
+    mem_limit: 256m
+    pids_limit: 64
+    depends_on:
+      object-storage: {condition: service_healthy}
+
   # ---------------------------------------------------------------- backend
   # One-shot: the ONLY process that migrates. Never started by `up` (profile "tools"): scripts/deploy.sh runs it
   # with `run --rm` after stopping the writers and before starting the new release.
@@ -216,6 +284,7 @@ services:
       vault-agent-backend: {condition: service_healthy}
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+      object-storage: {condition: service_healthy, required: false}
     mem_limit: ${API_MEM_LIMIT:-1g}
     pids_limit: 256
     stop_grace_period: 40s  # gunicorn graceful_timeout is 30 s
@@ -231,6 +300,7 @@ services:
       vault-agent-backend: {condition: service_healthy}
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+      object-storage: {condition: service_healthy, required: false}
     mem_limit: ${WORKER_MEM_LIMIT:-1g}
     pids_limit: 256
     healthcheck:
@@ -248,6 +318,7 @@ services:
     depends_on:
       vault-agent-backend: {condition: service_healthy}
       redis: {condition: service_healthy}
+      object-storage: {condition: service_healthy, required: false}
     mem_limit: 256m
     pids_limit: 64
     healthcheck: {disable: true}
@@ -298,6 +369,12 @@ services:
       OPS_ALLOWED_IPS: ${OPS_ALLOWED_IPS:-127.0.0.1/32}
       API_UPSTREAM: 172.30.0.30:8000
       FRONTEND_UPSTREAM: 172.30.0.20:3000
+      # /media/*: from the disk volume, or from the stack's own object storage (MEDIA_BACKEND is set by
+      # scripts/lib.sh app_compose from OBJECT_STORAGE_ENABLED and USE_S3).
+      MEDIA_BACKEND: ${MEDIA_BACKEND:?MEDIA_BACKEND is set by scripts/lib.sh (app_compose)}
+      OBJECT_STORAGE_UPSTREAM: 172.30.0.40:8333
+      OBJECT_STORAGE_BUCKET: glowderma-media
+      S3_LOCATION: ${S3_LOCATION:?S3_LOCATION missing (environments/<env>/stack.env)}
     volumes:
       - ../caddy:/etc/caddy:ro
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/caddy/data:/data

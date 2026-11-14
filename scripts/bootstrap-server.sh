@@ -158,6 +158,8 @@ install -d -m 0500 -o 1000 -g 1000 "$RUNTIME/vault/approle/frontend"
 install -d -m 0500 -o 999 -g 999 "$RUNTIME/vault/approle/datastores"
 install -d -m 0700 -o 1000 -g 1000 "$RUNTIME/caddy" "$RUNTIME/caddy/data" "$RUNTIME/caddy/config"
 install -d -m 0755 -o 10001 -g 10001 "$RUNTIME/media"
+# Self-hosted object storage (SeaweedFS, uid 999 like the datastores agent) and the media mirror.
+install -d -m 0750 -o 999 -g 999 "$RUNTIME/object-storage" "$RUNTIME/media-mirror"
 if [ ! -e "$RUNTIME/local.env" ]; then
 	install -m 0600 -o deploy -g deploy /dev/null "$RUNTIME/local.env"
 	cat >"$RUNTIME/local.env" <<'EOF'
