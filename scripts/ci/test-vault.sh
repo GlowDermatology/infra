@@ -32,9 +32,9 @@ done
 # read) is denied.
 allowed() {
 	case "$1:$2" in
-	backend:django | backend:shared | backend:db-app | backend:redis) return 0 ;;
+	backend:django | backend:shared | backend:db-app | backend:redis | backend:s3) return 0 ;;
 	frontend:frontend | frontend:shared) return 0 ;;
-	datastores:postgres | datastores:db-app | datastores:redis) return 0 ;;
+	datastores:postgres | datastores:db-app | datastores:redis | datastores:object-storage | datastores:s3) return 0 ;;
 	*) return 1 ;;
 	esac
 }
@@ -43,7 +43,7 @@ for env in staging production; do
 	for role in backend frontend datastores; do
 		dir="$work/rt-$env/vault/approle/$role"
 		token="$(VAULT_TOKEN=root "$vault" write -field=token auth/approle/login role_id="$(cat "$dir/role_id")" secret_id="$(cat "$dir/secret_id")")"
-		for path in django frontend shared db-app redis postgres; do
+		for path in django frontend shared db-app redis postgres s3 object-storage; do
 			if VAULT_TOKEN="$token" "$vault" kv get -mount=secret "$env/$path" >/dev/null 2>&1; then got=allow; else got=deny; fi
 			if allowed "$role" "$path"; then want=allow; else want=deny; fi
 			check "$env $role reads $env/$path: $want" "[ $got = $want ]"
@@ -54,19 +54,46 @@ for env in staging production; do
 	done
 done
 
+# generate-app-secrets.sh is idempotent: a second run keeps every existing value (checked on staging).
+snapshot() { for p in django s3 object-storage; do VAULT_TOKEN=root "$vault" kv get -format=json -mount=secret "staging/$p" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['data']['data'], sort_keys=True))"; done; }
+before="$(snapshot)"
+env GLOWDERMA_SKIP_ENV_GUARD=1 RUNTIME_DIR="$work/rt-staging" VAULT_LOCAL_BIN="$vault" VAULT_TOKEN=root 	"$here/scripts/vault/generate-app-secrets.sh" staging >/dev/null
+same=0
+[ "$(snapshot)" = "$before" ] && same=1
+check "a second generate-app-secrets.sh run keeps existing values" "[ $same = 1 ]"
+
+# media_preflight (scripts/lib.sh) reads these exact commands as the datastores role: they must be allowed on both
+# paths (the policy grants the data path only, never metadata).
+for env in staging production; do
+	dir="$work/rt-$env/vault/approle/datastores"
+	dtoken="$(VAULT_TOKEN=root "$vault" write -field=token auth/approle/login role_id="$(cat "$dir/role_id")" secret_id="$(cat "$dir/secret_id")")"
+	check "$env datastores: preflight existence read of s3 (S3_BUCKET_NAME) is allowed" 		"VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=S3_BUCKET_NAME $env/s3 >/dev/null"
+	check "$env datastores: preflight existence read of object-storage is allowed" 		"VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID $env/object-storage >/dev/null"
+	check "$env datastores: preflight field reads of s3 (endpoint) are allowed" 		"[ -n \"\$(VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=S3_ENDPOINT_URL $env/s3)\" ]"
+	check "$env datastores: metadata reads stay denied (why the preflight must not use them)" 		"! VAULT_TOKEN=$dtoken $vault kv metadata get -mount=secret $env/s3 >/dev/null 2>&1"
+	# vault_kv revokes its one-off login token right after the read.
+	check "$env datastores: the one-off token can revoke itself and is dead afterwards" \
+		"VAULT_TOKEN=$dtoken $vault token revoke -self >/dev/null && ! VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=S3_BUCKET_NAME $env/s3 >/dev/null 2>&1"
+done
+
 # Real agents render every template.
 for role in backend frontend datastores; do
 	out="$work/out-$role"
 	mkdir -p "$out"
-	sed -e "s#https://vault:8200#$VAULT_ADDR#" -e '/ca_cert/d' \
+	sed -e "s#https://vault:8200#$VAULT_ADDR#" -e '/ca_cert/d' -e 's#static_secret_render_interval = "5m"#static_secret_render_interval = "2s"#' \
 		-e "s#/vault/approle#$work/rt-staging/vault/approle/$role#g" \
 		-e "s#/vault/agent/templates#$here/vault/agent/templates#g" \
-		-e "s#/run/secrets#$out#g" -e "s#/tmp/agent.pid#$work/$role.pid#" \
+		-e "s#/run/object-storage-secrets#$out#g" -e "s#/run/secrets#$out#g" -e "s#/tmp/agent.pid#$work/$role.pid#" \
 		"$here/vault/agent/$role.hcl" >"$work/$role.hcl"
 	GLOWDERMA_ENV=staging VAULT_TOKEN='' timeout 15 "$vault" agent -config="$work/$role.hcl" >"$work/agent-$role.log" 2>&1 &
 done
 sleep 8
+# a key added later to secret/<env>/s3 reaches django.json at the next render (the test config shortens the
+# render interval from 5m to 2s; the templates are the real ones)
+VAULT_TOKEN=root "$vault" kv patch -mount=secret staging/s3 PUBLIC_MEDIA_BASE_URL=https://cdn.example.test/media/ >/dev/null
 b="$work/out-backend/django.json" f="$work/out-frontend/frontend.json" d="$work/out-datastores"
+for _ in $(seq 60); do grep -q PUBLIC_MEDIA_BASE_URL "$b" 2>/dev/null && break; sleep 0.5; done
+for p in s3 object-storage; do VAULT_TOKEN=root "$vault" kv get -format=json -mount=secret "staging/$p" >"$work/kv-$p.json"; done
 check "django.json is valid JSON with the required keys" "python3 -c \"
 import json; d = json.load(open('$b'))
 need = {'SECRET_KEY','JWT_SIGNING_KEYS','JWT_ACTIVE_KID','INTERNAL_API_SECRET','POSTGRES_PASSWORD','REDIS_URL',
@@ -82,9 +109,72 @@ check "Postgres app password = Django POSTGRES_PASSWORD" "python3 -c \"
 import json; assert json.load(open('$b'))['POSTGRES_PASSWORD'] == open('$d/postgres_app_password').read()
 \""
 check "Redis password in redis.conf and REDIS_URL" "grep -q \"^requirepass \$(cat $d/redis_password)\$\" $d/redis.conf && grep -q \"\$(cat $d/redis_password)@redis\" $b"
-check "rendered files are 0400" "[ \"\$(stat -c %a $b $f $d/redis.conf | sort -u)\" = 400 ]"
+check "django.json carries every key of secret/staging/s3 with its value, and no topology key" "python3 -c \"
+import json
+d = json.load(open('$b'))
+s3 = json.load(open('$work/kv-s3.json'))['data']['data']
+assert {'S3_ENDPOINT_URL','S3_BUCKET_NAME','S3_REGION_NAME','S3_ADDRESSING_STYLE','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY','PUBLIC_MEDIA_BASE_URL'} <= set(s3)
+assert all(d[k] == v for k, v in s3.items()), [k for k, v in s3.items() if d.get(k) != v]
+assert not ({'USE_S3', 'S3_LOCATION'} & set(d))
+\""
+check "datastores agent renders the 3 object storage files" "[ -s $d/object_storage_s3.json ] && [ -s $d/object_storage_admin_access_key ] && [ -s $d/object_storage_admin_secret_key ]"
+# (The test maps both agent volumes to one directory; on the server they are two volumes.)
+check "the object storage files go to their own volume, never next to the database passwords" "[ \"\$(grep -c 'destination *= \"/run/object-storage-secrets/object_storage_' $here/vault/agent/datastores.hcl)\" = 3 ] && ! grep -q 'destination *= \"/run/secrets/object_storage' $here/vault/agent/datastores.hcl"
+check "object_storage_s3.json has the admin, app and anonymous identities" "python3 -c \"
+import json
+j = json.load(open('$d/object_storage_s3.json'))
+s3 = json.load(open('$work/kv-s3.json'))['data']['data']
+adm = json.load(open('$work/kv-object-storage.json'))['data']['data']
+ids = {i['name']: i for i in j['identities']}
+assert list(ids) == ['admin', 'app', 'anonymous'], list(ids)
+assert ids['admin']['credentials'] == [{'accessKey': adm['OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID'], 'secretKey': adm['OBJECT_STORAGE_ADMIN_SECRET_ACCESS_KEY']}]
+assert ids['admin']['actions'] == ['Admin', 'Read', 'Write', 'List', 'Tagging']
+assert ids['app']['credentials'] == [{'accessKey': s3['S3_ACCESS_KEY_ID'], 'secretKey': s3['S3_SECRET_ACCESS_KEY']}]
+assert ids['app']['actions'] == ['Read:glowderma-media', 'Write:glowderma-media', 'List:glowderma-media', 'Tagging:glowderma-media']
+assert 'credentials' not in ids['anonymous'] and ids['anonymous']['actions'] == ['Read:glowderma-media']
+assert open('$d/object_storage_admin_access_key').read() == adm['OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID']
+assert open('$d/object_storage_admin_secret_key').read() == adm['OBJECT_STORAGE_ADMIN_SECRET_ACCESS_KEY']
+\""
+check "rendered files are 0400" "[ \"\$(stat -c %a $b $f $d/redis.conf $d/object_storage_s3.json $d/object_storage_admin_access_key $d/object_storage_admin_secret_key | sort -u)\" = 400 ]"
 check "no previous-render backups" "! ls $work/out-*/*.bak* >/dev/null 2>&1"
 pkill -f "$work/.*\.hcl" 2>/dev/null || true
+
+# Fail closed: when secret/<env>/object-storage or secret/<env>/s3 is missing (an existing environment where
+# generate-app-secrets.sh was not rerun, or a deleted path), the datastores agent must not leave an EMPTY
+# object storage file (an empty s3.json could mean open access, an empty admin key a blank credential).
+neg_case() { # <label> <env> <path to delete>
+	local label="$1" nenv="$2" gone="$3" nout="$work/neg-$1"
+	mkdir -p "$nout"
+	VAULT_TOKEN=root "$vault" kv metadata delete -mount=secret "$nenv/$gone" >/dev/null
+	sed -e "s#https://vault:8200#$VAULT_ADDR#" -e '/ca_cert/d' 		-e "s#/vault/approle#$work/rt-$nenv/vault/approle/datastores#g" 		-e "s#/vault/agent/templates#$here/vault/agent/templates#g" 		-e "s#/run/object-storage-secrets#$nout#g" -e "s#/run/secrets#$nout#g" -e "s#/tmp/agent.pid#$work/neg-$label.pid#" 		"$here/vault/agent/datastores.hcl" >"$work/neg-$label.hcl"
+	GLOWDERMA_ENV="$nenv" VAULT_TOKEN='' "$vault" agent -config="$work/neg-$label.hcl" >"$work/neg-$label.log" 2>&1 &
+	sleep 10
+	pkill -f "$work/neg-$label.hcl" 2>/dev/null || true
+	check "$label: no object storage file is written empty" "python3 -c \"
+import os
+for n in ('object_storage_s3.json', 'object_storage_admin_access_key', 'object_storage_admin_secret_key'):
+    p = '$nout/' + n
+    assert not os.path.exists(p) or os.path.getsize(p) > 0, n
+\""
+	check "$label: object_storage_s3.json is not written at all" "[ ! -e $nout/object_storage_s3.json ]"
+	check "$label: the agent reports the missing path (key path only), no secret_id leaked" "grep -q 'no secret exists at secret/data/$nenv/$gone' $work/neg-$label.log && ! grep -qF \"\$(cat $work/rt-$nenv/vault/approle/datastores/secret_id)\" $work/neg-$label.log"
+	check "$label: the other datastores files are still rendered and non-empty" "[ -s $nout/postgres_app_password ] && [ -s $nout/postgres_superuser_password ] && [ -s $nout/redis.conf ] && [ -s $nout/redis_password ]"
+}
+neg_case missing-object-storage production object-storage
+neg_case missing-s3 staging s3
+
+# What media_preflight keys on for "the secret does not exist" (neg_case deleted staging/s3 above): vault exits 2 and
+# prints "No value found". A denied read also exits 2 (Vault uses 2 for every API error), so the message is the key.
+dir="$work/rt-staging/vault/approle/datastores"
+dtoken="$(VAULT_TOKEN=root "$vault" write -field=token auth/approle/login role_id="$(cat "$dir/role_id")" secret_id="$(cat "$dir/secret_id")")"
+rc=0
+# shellcheck disable=SC2034 # err is read inside the eval of check
+err="$(VAULT_TOKEN=$dtoken "$vault" kv get -mount=secret -field=S3_BUCKET_NAME staging/s3 2>&1 >/dev/null)" || rc=$?
+check "a missing secret reads as exit 2 + 'No value found' (got exit $rc)" "[ $rc = 2 ] && [[ \"\$err\" == *'No value found'* ]]"
+rc=0
+# shellcheck disable=SC2034 # err is read inside the eval of check
+err="$(VAULT_TOKEN=$dtoken "$vault" kv get -mount=secret -field=X staging/django 2>&1 >/dev/null)" || rc=$?
+check "a denied path is exit 2 WITHOUT 'No value found' (not mistaken for missing)" "[ $rc = 2 ] && [[ \"\$err\" != *'No value found'* ]]"
 
 echo
 [ "$failures" -eq 0 ] || { echo "$failures Vault check(s) failed"; exit 1; }

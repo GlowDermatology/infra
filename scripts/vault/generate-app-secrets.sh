@@ -12,9 +12,14 @@
 #   secret/<env>/db-app    password of the glowderma_app database role                  backend + datastores
 #   secret/<env>/redis     Redis password                                               backend + datastores
 #   secret/<env>/postgres  Postgres superuser password                                  datastores only
+#   secret/<env>/s3        media storage provider settings + app key (keys = env var names)  backend + datastores
+#   secret/<env>/object-storage  admin key pair of the stack's own SeaweedFS               datastores only
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 use_env "${1:-}"
 ask_token
+
+# rand_alnum <n>: n random [A-Za-z0-9] characters.
+rand_alnum() { openssl rand -base64 96 | tr -dc 'A-Za-z0-9' | cut -c1-"$1"; }
 
 # put_new <path> <json>: creates the secret only when it does not exist. The JSON goes through stdin.
 put_new() {
@@ -35,4 +40,6 @@ put_new shared "$(printf '{"INTERNAL_API_SECRET":"%s"}' "$(rand_hex 32)")"
 put_new db-app "$(printf '{"password":"%s"}' "$(rand_hex 24)")"
 put_new redis "$(printf '{"password":"%s"}' "$(rand_hex 24)")"
 put_new postgres "$(printf '{"password":"%s"}' "$(rand_hex 24)")"
+put_new object-storage "$(printf '{"OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID":"glowderma-admin","OBJECT_STORAGE_ADMIN_SECRET_ACCESS_KEY":"%s"}' "$(rand_alnum 40)")"
+put_new s3 "$(printf '{"S3_ENDPOINT_URL":"http://object-storage:8333","S3_BUCKET_NAME":"glowderma-media","S3_REGION_NAME":"us-east-1","S3_ADDRESSING_STYLE":"path","S3_ACCESS_KEY_ID":"%s","S3_SECRET_ACCESS_KEY":"%s"}' "$(rand_alnum 20)" "$(rand_alnum 40)")"
 log "Done. CLICK_SECRET_KEY and PAYME_KEY are random placeholders until the providers issue the real ones."

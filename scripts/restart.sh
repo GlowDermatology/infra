@@ -5,6 +5,10 @@
 #
 #   scripts/restart.sh <staging|production> <backend|frontend|all>
 #
+# For the backend it first runs the deploy's media preflight (secret/<env>/s3 against stack.env: a Vault-only switch
+# away from the stack's own object storage is refused, it needs OBJECT_STORAGE_ENABLED=false), and afterwards, with
+# USE_S3=true, media_storage_check: a provider change that Django cannot use fails loudly here.
+#
 # Order matters. The rendered file lives in a tmpfs volume that survives an agent restart, so the old file is
 # removed first; the agent is healthy again only once it has rendered a fresh one from Vault, and only then are
 # the apps recreated (they read the file at start). Refuses while Vault is sealed, before touching anything.
@@ -32,6 +36,10 @@ case $vault_status in
 *) die "Vault does not answer: nothing restarted. scripts/healthcheck.sh $ENV" ;;
 esac
 
+if [ "$target" != frontend ]; then
+	media_preflight
+fi
+
 log "Re-rendering ${agents[*]} ($ENV)"
 for agent in "${agents[@]}"; do
 	case "$agent" in
@@ -46,4 +54,7 @@ app_compose up -d --no-deps --wait --wait-timeout 180 "${agents[@]}" ||
 
 "$INFRA_DIR/scripts/deploy.sh" "$ENV" --restart "${services[@]}"
 "$INFRA_DIR/scripts/healthcheck.sh" "$ENV"
+if [ "$target" != frontend ]; then
+	check_media_storage "The backend now runs with these Vault values: fix secret/$ENV/s3 and rerun this script."
+fi
 log "Restarted ${services[*]} ($ENV) with the current Vault values"

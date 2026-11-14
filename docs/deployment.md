@@ -58,17 +58,115 @@ Pull requests run the security stages, the tests and a build without push.
   `scripts/restore-postgres.sh <env> <file>` (it asks for confirmation and makes a safety dump first).
 - The last three production images are kept in GHCR by the cleanup job, so they can always be redeployed.
 
+## Media storage: switching to S3
+
+Media (uploaded images) lives on disk (`runtime/media`) until `USE_S3=true`. Both switches are public values in
+`environments/<env>/stack.env`, changed by PR and deployed like any release. Do staging first, then production.
+Before the first deploy of this release on an existing server, run `scripts/vault/generate-app-secrets.sh <env>`
+(it creates only the missing `s3` and `object-storage` Vault paths). Every deploy needs `secret/<env>/s3`, in every
+mode: the backend's `django.json` is rendered from it.
+
+**The stack's own object storage (SeaweedFS), in this order:**
+
+1. Set `OBJECT_STORAGE_ENABLED=true` (keep `USE_S3=false`) and deploy. SeaweedFS starts and the bucket is created.
+   Django still uses the disk.
+2. Copy the existing files into the bucket: `scripts/manage.sh <env> sync-media` (dry run: lists what would be
+   copied), then `scripts/manage.sh <env> sync-media --apply`. Django still runs on the disk: `sync-media` gives
+   only its own process `USE_S3=true`, so it writes to the bucket of `secret/<env>/s3` and reads `runtime/media`.
+3. Set `USE_S3=true` and deploy. `media_storage_check` gates this deploy: it fails the deploy when Django cannot
+   use the bucket.
+4. **Right after that deploy**, run `scripts/manage.sh <env> sync-media --apply` again: images uploaded between
+   step 2 and the switch went to the disk, and this copies them (it only uploads what the bucket lacks). Then
+   `scripts/manage.sh <env> django media_storage_check`, and open a product image URL: it must answer 200.
+
+From then on the nightly backup mirrors the bucket ([disaster-recovery.md](disaster-recovery.md)).
+
+**Leaving the stack's own storage** (for an external provider) **needs a PR**: `/media`, the nightly mirror and
+the deploy checks follow `OBJECT_STORAGE_ENABLED` in `stack.env`, not Vault. While it is `true` with `USE_S3=true`,
+`scripts/deploy.sh`, `scripts/restart.sh <env> backend` and the nightly backup all refuse an `S3_ENDPOINT_URL` whose
+host is not `object-storage` (otherwise `/media` would keep serving the old bucket and the backup would mirror a
+stale copy). In this order:
+
+1. Copy the bucket into the provider's bucket (the provider's tools, or `aws s3 sync` with both endpoints).
+2. `vault kv patch secret/<env>/s3` with the provider's settings (the keys listed below). Do **not** run
+   `restart.sh` (it refuses, see above).
+3. Merge the PR setting `OBJECT_STORAGE_ENABLED=false` (keep `USE_S3=true`) and deploy at once: the preflight
+   checks the provider settings; the deploy then runs `scripts/restart.sh <env> backend` (a fresh `django.json`,
+   the backend recreated on the provider, `media_storage_check`) and removes the object storage container (its
+   data stays in `runtime/object-storage`). Uploads made between step 1 and this deploy are in the old bucket
+   only: copy them again right after. For that copy start the old storage once by hand
+   (`scripts/manage.sh <env> --profile object-storage up -d object-storage`), and remove it afterwards
+   (`scripts/manage.sh <env> stop object-storage`).
+
+**An external provider already in use: another provider or bucket** (`OBJECT_STORAGE_ENABLED=false`, no PR):
+
+- `vault kv patch secret/<env>/s3` with `S3_ENDPOINT_URL`, `S3_BUCKET_NAME`, `S3_REGION_NAME`,
+  `S3_ADDRESSING_STYLE`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` and `PUBLIC_MEDIA_BASE_URL` (enter the secret
+  values through the Vault UI or `scripts/vault/put-secret.sh`, not on a command line), then
+  `scripts/restart.sh <env> backend`. It runs the deploy's media preflight first (`PUBLIC_MEDIA_BASE_URL` is
+  required, the endpoint must not be the stack's own) and `media_storage_check` afterwards: a setting Django cannot
+  use fails the restart loudly.
+- If the image host changes, add it to the frontend's `GLOWDERMA_MEDIA_HOSTS` (below) and rebuild the frontend:
+  it is baked in at build time.
+- Copy the files into a new bucket before switching (`sync-media --apply` copies `runtime/media`; copy an old
+  bucket with the provider's tools), and once more right after the restart for the uploads in between.
+
+**Rotating the stack's own S3 keys.** `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` in `secret/<env>/s3` are also the
+`app` identity in SeaweedFS's `s3.json`, which the datastores agent renders. After `vault kv patch`: re-render
+(`scripts/manage.sh <env> restart vault-agent-datastores`), restart the object storage
+(`scripts/manage.sh <env> restart object-storage`), then `scripts/restart.sh <env> backend`. SeaweedFS hot-reloading
+`s3.json` is not verified here, so the restart is part of the procedure. Uploads fail between the second and third
+step. The admin pair in `secret/<env>/object-storage` is read fresh by the backup and the bucket setup, and by
+SeaweedFS at its next start.
+
+**Rollback to the disk.** Copy the bucket back into `runtime/media`, set `USE_S3=false` and deploy, then **copy
+back once more**: the first copy makes sure every image uploaded while on S3 is on the disk before Django switches
+(otherwise they return 404), the second catches the uploads made between the first copy and the deploy. Keep
+`OBJECT_STORAGE_ENABLED=true` until the second copy is done. Both copies only add files (no `--delete`): the disk
+side holds every pre-S3 file, and nothing removed from the bucket needs removing from the disk. For the stack's
+own storage, on the server (`media` is `S3_LOCATION` in `stack.env`; the admin keys are read from the rendered
+secret files, never typed):
+
+```bash
+scripts/manage.sh <env> --profile object-storage-tools run --rm --no-deps -T --entrypoint sh object-storage-init -c '
+  export AWS_ACCESS_KEY_ID="$(cat /run/secrets/object_storage_admin_access_key)" \
+         AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/object_storage_admin_secret_key)" AWS_DEFAULT_REGION=us-east-1
+  aws --endpoint-url http://object-storage:8333 s3 sync s3://glowderma-media/media /mirror'
+sudo rsync -a /opt/glowderma/runtime/media-mirror/ /opt/glowderma/runtime/media/
+sudo chown -R 10001:10001 /opt/glowderma/runtime/media
+```
+
+With an external provider, `aws s3 sync` from that provider (its endpoint and keys) into
+`/opt/glowderma/runtime/media`, owned by 10001, the same way: before the `USE_S3=false` deploy and again after it.
+
 ## What `scripts/deploy.sh` does on the server
 
 1. Refuses if the server is a different environment (`/etc/glowderma/environment`).
 2. Exits without doing anything if an app has no image yet (first days of a new environment).
 3. Checks the Vault TLS and AppRole files exist and the Compose file resolves.
 4. Starts Vault if it is stopped (never recreates it) and refuses to continue while it is sealed.
-5. Pulls every image by digest.
-6. If the backend image changes: dumps the database, stops api/worker/beat, runs `backend-migrate` alone.
-7. `up -d --remove-orphans --wait`: every service healthy within 10 minutes, or it prints `ps` and the last
-   log lines and fails.
-8. Reloads Caddy, runs `scripts/healthcheck.sh`, records the release in `runtime/deployed/history.log`.
+5. Media preflight: `secret/<env>/s3` must exist in every mode (the backend's `django.json` is rendered from it)
+   and, with `OBJECT_STORAGE_ENABLED=true`, `secret/<env>/object-storage` too, or it stops with `run
+   scripts/vault/generate-app-secrets.sh <env> first`. With `USE_S3=true`: on the stack's own storage the endpoint's
+   host must be `object-storage`; with an external provider (`OBJECT_STORAGE_ENABLED=false`) it must not be, and
+   `PUBLIC_MEDIA_BASE_URL` must be set. Messages name keys, never values. (`scripts/restart.sh <env> backend` runs
+   the same preflight.)
+6. Pulls every image by digest (and the bucket-setup image when the object storage is enabled).
+7. Starts the secrets agents, postgres and redis; with `OBJECT_STORAGE_ENABLED=true` it also starts
+   `object-storage` and runs the one-shot `object-storage-init` (creates the bucket, idempotent). `vault/agent/` is
+   bind-mounted, so its hash is a label of the agents (`org.glowderma.agent-config`): when a config or template
+   changed, the agents are recreated, and the backend and frontend files are removed first so their healthchecks
+   wait for a render from the new templates.
+8. If the backend image changes: dumps the database, stops api/worker/beat, runs `backend-migrate` alone.
+9. `up -d --remove-orphans --wait`: every service healthy within 10 minutes, or it prints `ps` and the last
+   log lines and fails. With `OBJECT_STORAGE_ENABLED=false` a leftover object storage container (which
+   `--remove-orphans` keeps) is removed, after moving a `USE_S3=true` backend to the provider in Vault
+   (`restart.sh <env> backend`); its data stays in `runtime/object-storage`.
+10. Reloads Caddy, runs `scripts/healthcheck.sh`; with `USE_S3=true` runs `manage.py media_storage_check` and
+    fails the deploy with its output; records the release in `runtime/deployed/history.log`.
+
+The server needs **Docker Compose v2.20 or newer** (`depends_on ... required: false` makes the object storage
+optional). `docker compose version` shows it. `deploy.sh` does not check the version itself.
 
 The SSH session takes a lock (`runtime/deploy.lock`): two deploys never overlap.
 

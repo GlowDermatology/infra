@@ -34,6 +34,8 @@ jobs:
           done
       - name: scripts/validate.sh (compose for both envs, structural rules, Caddy validate + edge probe, shellcheck)
         run: CADDY_BIN="$RUNNER_TEMP/bin/caddy" scripts/validate.sh
+      - name: Media preflight rules (stubbed Vault)
+        run: scripts/ci/test-media-preflight.sh
       - name: Vault end to end (policies, negative authorization, real agents rendering every template)
         # As root: configure.sh writes the AppRole files owned by the agents' UIDs, exactly as on a server.
         run: sudo --preserve-env=PATH VAULT_BIN="$RUNNER_TEMP/bin/vault" scripts/ci/test-vault.sh

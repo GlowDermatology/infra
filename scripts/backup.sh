@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Backups of one environment. Run as root on its server.
 #
-#   scripts/backup.sh <env> nightly      database + media + Vault snapshot, prune old local files, copy off-host
+#   scripts/backup.sh <env> nightly      database + media (disk, or a mirror of the object storage; nothing for an
+#                                        external S3 provider) + Vault snapshot, prune old local files, copy off-host
 #                                        (cron: /etc/cron.d/glowderma-backup, installed by bootstrap-server.sh)
 #   scripts/backup.sh <env> pre-deploy   database only, before a release that changes the backend (deploy.sh)
 #
@@ -10,7 +11,7 @@
 #
 # Off-host copy (docs/disaster-recovery.md), configured in /opt/glowderma/runtime/local.env:
 #   BACKUP_AGE_RECIPIENT=age1...      public key; the private key lives OFF this server (password manager)
-#   BACKUP_RCLONE_REMOTE=uzbackup:glowderma/<env>   an rclone remote in Uzbekistan (compliance)
+#   BACKUP_RCLONE_REMOTE=offsite:glowderma/<env>    an rclone remote off this server
 # Plaintext never leaves the host: a remote without an age recipient is refused.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 use_env "${1:-}"
@@ -58,13 +59,47 @@ pending=""
 finish "$db"
 
 if [ "$label" = nightly ]; then
-	media="$backup_dir/$ENV-media-$stamp.tar.gz"
-	pending="$media.tmp"
-	tar -C "$RUNTIME_DIR/media" -czf "$pending" . || die "media tarball failed"
-	tar -tzf "$pending" >/dev/null || die "the media tarball does not list"
-	mv -- "$pending" "$media"
-	pending=""
-	finish "$media"
+	# Media: on disk, mirrored out of the stack's object storage, or an external provider (not our data).
+	media_src=""
+	media_error=""
+	# The mirror follows stack.env; Django follows secret/<env>/s3. If they disagree (a Vault-only switch to another
+	# provider), mirroring the stack's bucket would back up a stale copy without a word: refuse it loudly instead and
+	# still finish the database and Vault backups (the script then exits non-zero).
+	if [ "$(media_backend)" = object-storage ] && ! (
+		secret_must_exist s3 S3_BUCKET_NAME
+		own_storage_endpoint_check
+	); then
+		media_error="media NOT backed up: Django does not use the stack's object storage (see the error above)"
+		echo "ERROR: $media_error" >&2
+	elif [ "$(media_backend)" = object-storage ]; then
+		# Admin keys are read from files inside the container (as in object-storage/init.sh), never put in argv.
+		app_compose --profile object-storage-tools run --rm --no-deps -T -e MEDIA_LOCATION="$(stack_value S3_LOCATION)" \
+			--entrypoint sh object-storage-init -c '
+			set -eu
+			for f in /run/secrets/object_storage_admin_access_key /run/secrets/object_storage_admin_secret_key; do
+				[ -s "$f" ] || { echo "backup: $f is missing or empty" >&2; exit 1; }
+			done
+			AWS_ACCESS_KEY_ID="$(cat /run/secrets/object_storage_admin_access_key)"
+			AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/object_storage_admin_secret_key)"
+			AWS_DEFAULT_REGION=us-east-1
+			export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
+			exec aws --endpoint-url http://object-storage:8333 s3 sync "s3://glowderma-media/$MEDIA_LOCATION" /mirror --delete --only-show-errors' ||
+			die "object storage mirror failed"
+		media_src="$RUNTIME_DIR/media-mirror"
+	elif [ "$(stack_value USE_S3)" = true ]; then
+		echo "media: external provider, not backed up here"
+	else
+		media_src="$RUNTIME_DIR/media"
+	fi
+	if [ -n "$media_src" ]; then
+		media="$backup_dir/$ENV-media-$stamp.tar.gz"
+		pending="$media.tmp"
+		tar -C "$media_src" -czf "$pending" . || die "media tarball failed"
+		tar -tzf "$pending" >/dev/null || die "the media tarball does not list"
+		mv -- "$pending" "$media"
+		pending=""
+		finish "$media"
+	fi
 
 	# Vault Raft snapshot (encrypted by Vault's own barrier; restoring it needs the unseal keys).
 	token_file="$RUNTIME_DIR/vault/snapshot-token"
@@ -92,3 +127,4 @@ if [ -n "$remote" ]; then
 	done
 	echo "backup $label: copied ${#created[@]} file(s) to $remote"
 fi
+[ -z "${media_error:-}" ] || die "$media_error"

@@ -1,0 +1,1 @@
+{{- with secret (printf "secret/data/%s/object-storage" (env "GLOWDERMA_ENV")) }}{{ .Data.data.OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID }}{{ end -}}
