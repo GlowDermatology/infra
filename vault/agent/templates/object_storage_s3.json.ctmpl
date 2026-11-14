@@ -1,11 +1,14 @@
 {{- /* SeaweedFS identities file (-s3.config). admin = the object-storage pair; app = the S3_ACCESS_KEY_ID /
        S3_SECRET_ACCESS_KEY pair the backend uses, limited to the stack bucket; anonymous = unauthenticated GET
        of that bucket (how media is served without signed URLs). Values go through toJSON.
-       No `with`/`if` around the secrets: a missing path must fail the render (nil .Data), never write an
-       empty identities file (SeaweedFS could treat that as open access). */ -}}
+       A missing secret path never reaches this template: the agent's vault read fails ("no secret exists at
+       ...") and withholds every file that depends on it (proved by the missing-* cases of
+       scripts/ci/test-vault.sh). Do not replace the guards with a bare `.Data.data.X`: the first render pass sees
+       nil before the read completes and would fail the happy path too. */ -}}
 {{- $env := env "GLOWDERMA_ENV" -}}
 {{- $admin := secret (printf "secret/data/%s/object-storage" $env) -}}
 {{- $s3 := secret (printf "secret/data/%s/s3" $env) -}}
+{{- if and $admin $s3 -}}
 {
   "identities": [
     {
@@ -24,3 +27,4 @@
     }
   ]
 }
+{{- end -}}

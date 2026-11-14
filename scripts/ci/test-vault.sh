@@ -139,7 +139,8 @@ for n in ('object_storage_s3.json', 'object_storage_admin_access_key', 'object_s
     assert not os.path.exists(p) or os.path.getsize(p) > 0, n
 \""
 	check "$label: object_storage_s3.json is not written at all" "[ ! -e $nout/object_storage_s3.json ]"
-	check "$label: the render error names the template, not a secret value" "grep -q 'object_storage' $work/neg-$label.log && ! grep -qF \"\$(cat $work/rt-$nenv/vault/approle/datastores/secret_id)\" $work/neg-$label.log"
+	check "$label: the agent reports the missing path (key path only), no secret_id leaked" "grep -q 'no secret exists at secret/data/$nenv/$gone' $work/neg-$label.log && ! grep -qF \"\$(cat $work/rt-$nenv/vault/approle/datastores/secret_id)\" $work/neg-$label.log"
+	check "$label: the other datastores files are still rendered and non-empty" "[ -s $nout/postgres_app_password ] && [ -s $nout/postgres_superuser_password ] && [ -s $nout/redis.conf ] && [ -s $nout/redis_password ]"
 }
 neg_case missing-object-storage production object-storage
 neg_case missing-s3 staging s3

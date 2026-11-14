@@ -1,2 +1,1 @@
-{{- /* No `with`: a missing secret must fail the render (error), never write an empty key file. */ -}}
-{{- (secret (printf "secret/data/%s/object-storage" (env "GLOWDERMA_ENV"))).Data.data.OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID -}}
+{{- with secret (printf "secret/data/%s/object-storage" (env "GLOWDERMA_ENV")) }}{{ .Data.data.OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID }}{{ end -}}
