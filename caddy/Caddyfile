@@ -101,6 +101,8 @@
 		reverse_proxy {$OBJECT_STORAGE_UPSTREAM} {
 			header_up Host {upstream_hostport}
 			header_up -Authorization
+			# The site's session cookies never reach the storage.
+			header_up -Cookie
 			header_up -X-Amz-*
 			header_down -Server
 			header_down -Cache-Control

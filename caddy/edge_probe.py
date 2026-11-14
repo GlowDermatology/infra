@@ -416,7 +416,11 @@ def check_object_storage_media(probe: Probe, port: int, host: str, label: str, s
         storage.requests.clear()
     answer = request(
         port, host, "GET", "/media/products/1/a.webp?list-type=2",
-        headers={"Authorization": "AWS4-HMAC-SHA256 probe", "X-Amz-Date": "20260101T000000Z"},
+        headers={
+            "Authorization": "AWS4-HMAC-SHA256 probe",
+            "X-Amz-Date": "20260101T000000Z",
+            "Cookie": "sessionid=probe-session; csrftoken=probe-csrf",
+        },
     )
     probe.check(
         answer.status == 200 and answer.body == STORED_BODY,
@@ -436,6 +440,10 @@ def check_object_storage_media(probe: Probe, port: int, host: str, label: str, s
     probe.check(
         not any(key.lower() in ("authorization", "x-amz-date") for key in headers),
         f"{label} storage: a credential or X-Amz-* request header was forwarded",
+    )
+    probe.check(
+        not any(key.lower() == "cookie" for key in headers),
+        f"{label} storage: the client's Cookie header was forwarded to the storage",
     )
     probe.check(
         answer.values("Cache-Control") == ["public, max-age=604800"],
