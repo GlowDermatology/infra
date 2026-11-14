@@ -30,7 +30,8 @@ for env in staging production; do
 	d="environments/$env"
 	# MEDIA_BACKEND is computed by lib.sh (app_compose) in real use; compute it the same way here.
 	MEDIA_BACKEND="$(ENV_DIR="$d" media_backend)"
-	export MEDIA_BACKEND
+	VAULT_AGENT_CONFIG_HASH="$(agent_config_hash)"
+	export MEDIA_BACKEND VAULT_AGENT_CONFIG_HASH
 	# Three renders: the default stack, with the optional object storage, and with every profile (tools too).
 	for variant in base os os-tools; do
 		case "$variant" in
@@ -204,6 +205,10 @@ for env in ("staging", "production"):
     wanted = "object-storage" if stack.get("OBJECT_STORAGE_ENABLED") == stack.get("USE_S3") == "true" else "disk"
     if app["services"]["edge"]["environment"].get("MEDIA_BACKEND") != wanted:
         err(f"{env}/edge: MEDIA_BACKEND must be {wanted} for OBJECT_STORAGE_ENABLED/USE_S3 in stack.env")
+    # Agents are recreated when vault/agent/ changes (scripts/lib.sh agent_config_hash).
+    for name, svc in app["services"].items():
+        if name.startswith("vault-agent") and not (svc.get("labels") or {}).get("org.glowderma.agent-config"):
+            err(f"{env}/{name}: the org.glowderma.agent-config label is missing")
     # No application container may receive a Vault token or AppRole credentials.
     for name, svc in app["services"].items():
         if name.startswith("vault-agent"):

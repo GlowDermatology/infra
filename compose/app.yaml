@@ -37,6 +37,10 @@ x-agent: &agent
   networks: [vault]
   mem_limit: 64m
   pids_limit: 64
+  # A hash of everything under vault/agent/ (bind-mounted, so Compose cannot see a change there). A changed config or
+  # template changes this label, so the next `up` recreates the agents and they render the new templates.
+  labels:
+    org.glowderma.agent-config: ${VAULT_AGENT_CONFIG_HASH:?VAULT_AGENT_CONFIG_HASH is set by scripts/lib.sh (app_compose)}
 
 x-backend: &backend
   <<: *hardened

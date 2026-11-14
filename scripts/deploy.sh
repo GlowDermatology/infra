@@ -8,9 +8,10 @@
 #   1. guards: right server, both images published, Vault material present, Compose file valid
 #   2. Vault: started if not running (never recreated), must be unsealed; media settings in Vault checked
 #   3. pull every image by digest
-#   4. if the backend image changes: pre-deploy database dump, stop the writers, run migrations (one process)
-#      With OBJECT_STORAGE_ENABLED=true the object storage starts here and its bucket is created.
-#   5. `up -d` the whole stack and wait until every service is healthy
+#   4. the secrets agents (recreated, with a fresh render, when vault/agent/ changed) and the datastores start;
+#      with OBJECT_STORAGE_ENABLED=true the object storage starts here and its bucket is created.
+#      If the backend image changes: pre-deploy database dump, stop the writers, run migrations (one process)
+#   5. `up -d` the whole stack and wait until every service is healthy; a disabled object storage is removed
 #   6. reload Caddy (zero downtime), smoke test, media_storage_check (USE_S3=true), record what is deployed, prune old images
 #
 # Needs Docker Compose >= 2.20 on the server (`depends_on ... required: false` for the optional object storage).
@@ -85,6 +86,21 @@ fi
 mkdir -p "$RUNTIME_DIR/deployed"
 backend_digest="$(image_value backend DIGEST)"
 previous_backend="$(cat "$RUNTIME_DIR/deployed/backend.digest" 2>/dev/null || true)"
+
+# Agents whose vault/agent/ files changed are recreated by the `up` below (their org.glowderma.agent-config label
+# differs). Their rendered file survives in its tmpfs volume, so it is removed first, as restart.sh does: the
+# healthcheck then waits for a render from the new templates instead of passing on the old file. (The datastores
+# agent's files only gain new ones; the object storage waits for its own file.)
+agent_hash="$(agent_config_hash)"
+for agent_file in vault-agent-backend:/run/secrets/django.json vault-agent-frontend:/run/secrets/frontend.json; do
+	agent="${agent_file%%:*}"
+	id="$(app_compose ps -q "$agent")"
+	[ -n "$id" ] || continue
+	if [ "$(docker inspect -f '{{index .Config.Labels "org.glowderma.agent-config"}}' "$id")" != "$agent_hash" ]; then
+		note "$agent: vault/agent changed, it re-renders from the new templates"
+		app_compose exec -T "$agent" rm -f "${agent_file#*:}"
+	fi
+done
 
 log "Starting secrets and datastores"
 app_compose up -d --wait --wait-timeout 300 \

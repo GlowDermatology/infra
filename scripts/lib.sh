@@ -45,11 +45,21 @@ media_backend() {
 	fi
 }
 
+# agent_config_hash: a short hash of every file under vault/agent/ (configs and templates). compose/app.yaml puts it
+# in a label of the Vault Agent services: the directory is bind-mounted, so without it a changed template would
+# never reach an agent that is already running (`up` sees no change and does not recreate it).
+agent_config_hash() {
+	(cd "$INFRA_DIR" && find vault/agent -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) |
+		sha256sum | cut -c1-16
+}
+
 # app_compose <compose args...>: the application project of $ENV, with every env file in the right order.
-# Exports MEDIA_BACKEND and adds the object-storage profile when OBJECT_STORAGE_ENABLED=true.
+# Exports MEDIA_BACKEND and VAULT_AGENT_CONFIG_HASH, and adds the object-storage profile when
+# OBJECT_STORAGE_ENABLED=true.
 app_compose() {
 	MEDIA_BACKEND="$(media_backend)"
-	export MEDIA_BACKEND
+	VAULT_AGENT_CONFIG_HASH="$(agent_config_hash)"
+	export MEDIA_BACKEND VAULT_AGENT_CONFIG_HASH
 	local args=(-p "glowderma-$ENV" -f "$INFRA_DIR/compose/app.yaml"
 		--env-file "$ENV_DIR/stack.env"
 		--env-file "$ENV_DIR/backend/image.env"
