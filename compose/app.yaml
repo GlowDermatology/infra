@@ -49,7 +49,8 @@ x-backend: &backend
   # App settings and secrets: every key of secret/<env>/django in Vault, rendered into DJANGO_SECRETS_FILE
   # (overrides only: an unset key keeps its default in config/settings). Below: topology only.
   environment: &backend-env
-    DJANGO_SETTINGS_MODULE: config.settings.production
+    # config.settings.production or config.settings.staging (extends production), per environments/<env>/stack.env.
+    DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:?DJANGO_SETTINGS_MODULE is set in environments/<env>/stack.env}
     # Rendered by vault-agent-backend: every secret, including the DB and Redis credentials.
     DJANGO_SECRETS_FILE: /run/secrets/django.json
     POSTGRES_NAME: glowderma

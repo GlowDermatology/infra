@@ -12,6 +12,7 @@
 | deploy trigger | automatic on every app `main` build | Promote button + required reviewer |
 | GitHub environment (infra repo) | `staging` (no reviewers) | `production` (required reviewers, `main` only) |
 | `ALERT_ENV` / ops console badge | `staging` | `production` |
+| Django settings (`DJANGO_SETTINGS_MODULE` in `stack.env`) | `config.settings.staging` (production + fake Billz active) | `config.settings.production` |
 | backend image | the same digest is promoted | ← byte-for-byte |
 | frontend image | `frontend-<sha>-staging` | `frontend-<sha>-production` (same commit, production domain baked in) |
 
