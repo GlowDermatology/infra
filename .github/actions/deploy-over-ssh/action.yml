@@ -1,0 +1,22 @@
+name: Deploy over SSH
+description: Deploy the approved infra commit with the target environment's SSH credentials
+runs:
+  using: composite
+  steps:
+    - name: Deploy through the server's deploy gate
+      shell: bash
+      run: |
+        set -euo pipefail
+        : "${SSH_KEY:?Missing environment secret VPS_SSH_KEY}"
+        : "${HOST:?Missing environment secret VPS_HOST}"
+        : "${HOST_KEY:?Missing environment variable VPS_HOST_KEY}"
+        ssh_dir="$(mktemp -d)"
+        trap 'rm -f "$ssh_dir/id_deploy" "$ssh_dir/known_hosts"; rmdir "$ssh_dir"' EXIT
+        umask 077
+        printf '%s\n' "$SSH_KEY" > "$ssh_dir/id_deploy"
+        printf '%s %s\n' "$HOST" "$HOST_KEY" > "$ssh_dir/known_hosts"
+        # The deploy gate accepts this command and reads the registry token on stdin.
+        printf '%s\n' "$GHCR_TOKEN" |
+          ssh -i "$ssh_dir/id_deploy" -o "UserKnownHostsFile=$ssh_dir/known_hosts" \
+            -o StrictHostKeyChecking=yes -o BatchMode=yes -o ServerAliveInterval=30 \
+            "${USERNAME:-deploy}@$HOST" "deploy $TARGET $SHA $GHCR_USER"

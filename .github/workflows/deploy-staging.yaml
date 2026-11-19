@@ -18,7 +18,7 @@ on:
 permissions: {}
 
 jobs:
-  deploy:
+  prepare:
     permissions:
       contents: read
       packages: read
@@ -27,3 +27,32 @@ jobs:
     with:
       environment: staging
       scan_policy: ${{ inputs.scan_policy || (contains(github.event.head_commit.message, '[scan-policy:report]') && 'report' || 'enforce') }}
+
+  deploy:
+    name: Deploy staging
+    needs: prepare
+    if: needs.prepare.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    environment: staging
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Deploy over SSH
+        uses: ./.github/actions/deploy-over-ssh
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          HOST: ${{ secrets.VPS_HOST }}
+          HOST_KEY: ${{ vars.VPS_HOST_KEY }}
+          USERNAME: ${{ secrets.VPS_USERNAME }}
+          TARGET: staging
+          SHA: ${{ github.sha }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
