@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Issue a new AppRole secret_id for one agent, switch the agent to it, then revoke the old one.
 #
-#   scripts/vault/rotate-approle-secret-id.sh <env> <backend|frontend|datastores>     (run as root)
+#   scripts/vault/rotate-approle-secret-id.sh <env> <backend|frontend|datastores|ai-writer|ai-reader>     (run as root)
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 use_env "${1:-}"
 role="${2:-}"
-declare -A uid=([backend]=10001 [frontend]=1000 [datastores]=999)
-[ -n "${uid[$role]:-}" ] || die "role must be backend, frontend or datastores"
+declare -A uid=([backend]=10001 [frontend]=1000 [datastores]=999 [ai-writer]=10001 [ai-reader]=10001)
+[ -n "${uid[$role]:-}" ] || die "role must be backend, frontend, datastores, ai-writer or ai-reader"
 [ "$(id -u)" -eq 0 ] || die "run as root"
 ask_token
 dir="$RUNTIME_DIR/vault/approle/$role"

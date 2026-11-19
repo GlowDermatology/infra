@@ -9,7 +9,7 @@
 | Deploy workflows | SSH as `deploy` through the deploy gate: deploy a commit that is on `main` | open a shell, run any other command, deploy an unmerged commit, read Vault secrets (they are rendered on the server) |
 | Bootstrap workflow | SSH as root with `VPS_BOOTSTRAP_SSH_KEY`, run `scripts/bootstrap-server.sh` | run without that separate secret |
 | `deploy` user | Docker (root-equivalent on that host) | anything on the other environment's server |
-| Application containers | read their own rendered secret files | reach Vault's token, AppRole files, the Docker socket |
+| Application containers | read their own rendered secret files; api / worker: write / read AI provider key versions through their own agent's proxy | reach Vault's token, AppRole files, the Docker socket, another agent's proxy |
 
 The `deploy` user is in the `docker` group, which is root-equivalent on that server. That is why its SSH key
 (`VPS_SSH_KEY`) is pinned to the deploy gate (`restrict,command=...`, see
@@ -25,7 +25,9 @@ No registry credential lives on a server: each deploy brings its job's short-liv
 - `cap_drop: [ALL]`, `no-new-privileges`, no `privileged`, no `cap_add`, no Docker socket
 - only the edge publishes ports (80/tcp, 443/tcp, 443/udp); PostgreSQL and Redis on an internal network
 - memory and PID limits, health checks, log rotation
-- no Vault variable or AppRole mount in any application container
+- no Vault variable or AppRole mount in any application container (exception: the AI key store settings
+  `VAULT_MODE`, `VAULT_PROXY_URL`, `VAULT_KV_MOUNT`, `VAULT_AI_PREFIX` on api and worker; no credential)
+- only agents on the Vault network; each AI agent's network holds exactly that agent and its one consumer
 
 ## Supply chain
 
@@ -59,8 +61,8 @@ Results go to each repository's Security tab (SARIF, one category per scanner an
 ## Vault
 
 TLS always on and always verified (own CA); no published port; administration from the host only; Raft
-storage; audit device enabled; one AppRole per consumer group with read-only policies on exact paths; no
-token sink; unseal keys and root token never stored on a server or in GitHub. A shared Vault would be a single
+storage; audit device enabled; one AppRole per consumer group with read-only policies on exact paths (the one
+write grant: `ai-writer`, create/update on `secret/data/<env>/ai/*`, without read); no token sink; unseal keys and root token never stored on a server or in GitHub. A shared Vault would be a single
 security and availability boundary for both environments: that is why each environment has its own.
 
 ## Network

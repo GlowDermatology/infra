@@ -15,7 +15,7 @@ fail() {
 
 log "Containers"
 # A Vault agent that has nothing rendered yet means Vault is sealed or unreachable, not a broken release.
-for agent in vault-agent-backend vault-agent-frontend vault-agent-datastores; do
+for agent in vault-agent-backend vault-agent-frontend vault-agent-datastores vault-agent-ai-writer vault-agent-ai-reader; do
 	state="$(docker inspect -f '{{.State.Health.Status}}' "glowderma-$ENV-$agent-1" 2>/dev/null || echo missing)"
 	if [ "$state" = healthy ]; then ok "$agent"; else fail "$agent is $state: Vault sealed or unreachable? scripts/vault/unseal.sh $ENV"; fi
 done

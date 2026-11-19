@@ -26,6 +26,7 @@ secret/<env>/redis      Django + Redis         password
 secret/<env>/postgres   Postgres only          password  (superuser, never reaches Django)
 secret/<env>/s3         Django + object storage  media storage provider settings and the app key (keys = env var names)
 secret/<env>/object-storage  object storage only   OBJECT_STORAGE_ADMIN_ACCESS_KEY_ID, OBJECT_STORAGE_ADMIN_SECRET_ACCESS_KEY
+secret/<env>/ai/<provider>   Django at run time   api_key  (AI assistant provider key, e.g. ai/gemini; versioned, see below)
 ```
 
 Each value is stored once. The agent templates compose what each consumer needs, for example Django's
@@ -38,9 +39,40 @@ read of the other environment.
 | `<env>-backend` | django, shared, db-app, redis, s3 | 10001 | `django.json`, `fcm.json`, `apple.p8` |
 | `<env>-frontend` | frontend, shared | 1000 | `frontend.json` |
 | `<env>-datastores` | postgres, db-app, redis, object-storage, s3 | 999 | `postgres_*_password`, `redis.conf`, `redis_password`, `object_storage_s3.json`, `object_storage_admin_{access,secret}_key` |
+| `<env>-ai-writer` | nothing: **create/update** on `ai/*` only | 10001 | nothing (API proxy for `backend-api`) |
+| `<env>-ai-reader` | `ai/*` | 10001 | nothing (API proxy for `backend-worker`) |
 
 One agent serves all Django processes (api, worker, beat, migrate) because every Django process loads the
 full settings, Celery app included: a separate Celery identity would hold the same secrets.
+
+### AI provider keys (`secret/<env>/ai/*`)
+
+The AI product content assistant's provider key (backend `docs/ops/ai-assistant.md`) is the one secret Django
+handles **at run time**: a superuser types a new key in the ops console, it becomes a new KV v2 version, a worker
+tests that version, and only then does PostgreSQL mark it active. Every worker picks the active version on its next
+job: **no restart, no re-render**. Django still holds no Vault token and no AppRole file:
+
+```
+backend-api    ──http, no token──► vault-agent-ai-writer (network ai-writer) ──AppRole <env>-ai-writer──► Vault
+backend-worker ──http, no token──► vault-agent-ai-reader (network ai-reader) ──AppRole <env>-ai-reader──► Vault
+```
+
+- Each agent is an `api_proxy` with `use_auto_auth_token = "force"` (a client's own token is replaced), no cache,
+  no template, no sink. Its listener (`:8100`, plain HTTP) binds only the agent's fixed address on an internal
+  network that holds only the agent and its one consumer (writer `172.30.4.10`, reader `172.30.5.10`; never
+  `0.0.0.0`, so the shared `vault` network cannot reach it), so nothing else in the stack can use its token. TLS to Vault is verified as for every agent.
+- `ai-writer`: `create`, `update` on `secret/data/<env>/ai/*`. It cannot read a key back, list, delete, destroy, or
+  touch metadata. `ai-reader`: `read` on the same data path (a given `?version=N` or the latest), nothing else.
+  Beat and migrate reach neither agent.
+- `scripts/vault/configure.sh` sets `max_versions=20` on `secret/<env>/ai/gemini`: room for
+  failed key tests without ever pruning the active or the previous version. A new provider gets its line there.
+- The api and the worker get `VAULT_MODE=live`, `VAULT_PROXY_URL` (their own agent), `VAULT_KV_MOUNT=secret` and
+  `VAULT_AI_PREFIX=<env>/ai` from `compose/app.yaml`: the only `VAULT_*` variables an application container may have
+  (`scripts/validate.sh`). Never put them in `secret/<env>/django`: that file wins over the environment and would
+  give the worker the writer's address. `AI_MODE=live` goes in `secret/<env>/django` like every provider mode.
+- The key itself is never typed on the server: no `put-secret.sh`, no Vault UI. Use the ops console (rotate, test,
+  roll back to the previous version). In an emergency a Vault admin can soft-delete a version
+  (`vault kv delete -versions=N -mount=secret <env>/ai/gemini`); the worker then reports the key as missing.
 
 ### Media storage (S3)
 
@@ -106,7 +138,8 @@ container entrypoint waits for the file to exist before starting Django.
 | add/change one Django or Next secret | `scripts/vault/put-secret.sh <env> django <KEY>` (hidden prompt, then `restart.sh`) |
 | rotate the database app password | `scripts/vault/rotate-db-password.sh <env>` |
 | rotate the internal API secret | `scripts/vault/rotate-internal-secret.sh <env>` |
-| rotate an agent's AppRole secret_id | `scripts/vault/rotate-approle-secret-id.sh <env> <role>` (root) |
+| rotate an agent's AppRole secret_id | `scripts/vault/rotate-approle-secret-id.sh <env> <role>` (root; roles include `ai-writer`, `ai-reader`) |
+| rotate the AI provider key | ops console → AI assistant → provider → new key (superuser). No restart, no command on the server |
 | rotate Redis or the superuser password | write the new value, then `scripts/deploy.sh <env> --restart redis backend-api backend-worker backend-beat` (Redis) or `ALTER ROLE glowderma PASSWORD` via `scripts/manage.sh <env> psql` (superuser) |
 
 **Why a restart:** the agent re-renders a changed file within 5 minutes (`static_secret_render_interval`), but
@@ -123,6 +156,7 @@ on the restarted service, not on the whole site.
 | AppRole login refused (secret_id revoked, policy missing) | the agent logs the error and retries with backoff; its healthcheck stays unhealthy; `healthcheck.sh` points at Vault. |
 | A required secret key missing | the agent does not render the file (`error_on_missing_key`); the consumer keeps waiting; the agent log names the key. |
 | A secret has a placeholder value | Django refuses to start (production settings validation) with a message naming the key. |
+| An AI agent down, Vault sealed, AppRole refused | only the AI assistant is affected: key rotation and generation answer "Vault unavailable", the old key stays active, the rest of the site works. The agent's healthcheck (`vault status` through its proxy) shows it; a refused login is in its log. |
 
 ## Moving to dynamic database credentials later
 

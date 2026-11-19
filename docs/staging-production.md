@@ -7,7 +7,7 @@
 | domain | `environments/staging/stack.env` (`staging.glowderma.uz`) | `environments/production/stack.env` (`glowderma.uz`) |
 | Vault | its own server, its own unseal keys | its own server, its own unseal keys |
 | secrets paths | `secret/staging/*` | `secret/production/*` |
-| AppRoles | `staging-backend`, `staging-frontend`, `staging-datastores` | `production-…` |
+| AppRoles | `staging-backend`, `staging-frontend`, `staging-datastores`, `staging-ai-writer`, `staging-ai-reader` | `production-…` |
 | database, Redis, media | on the staging server | on the production server |
 | deploy trigger | automatic on every app `main` build | Promote button + required reviewer |
 | GitHub environment (infra repo) | `staging` (no reviewers) | `production` (required reviewers, `main` only) |

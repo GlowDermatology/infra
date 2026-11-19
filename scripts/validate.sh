@@ -209,16 +209,57 @@ for env in ("staging", "production"):
     for name, svc in app["services"].items():
         if name.startswith("vault-agent") and not (svc.get("labels") or {}).get("org.glowderma.agent-config"):
             err(f"{env}/{name}: the org.glowderma.agent-config label is missing")
-    # No application container may receive a Vault token or AppRole credentials.
+    # No application container may receive a Vault token or AppRole credentials. The one exception is the AI key
+    # store's settings: the api and the worker call their own agent's API proxy, which adds the token itself.
+    ai_agents = {"backend-api": "vault-agent-ai-writer", "backend-worker": "vault-agent-ai-reader"}
     for name, svc in app["services"].items():
         if name.startswith("vault-agent"):
             continue
-        for key in (svc.get("environment") or {}):
-            if key.startswith("VAULT_"):
+        senv = svc.get("environment") or {}
+        for key in senv:
+            if key.startswith("VAULT_") and not (name in ai_agents and key in ("VAULT_MODE", "VAULT_PROXY_URL", "VAULT_KV_MOUNT", "VAULT_AI_PREFIX")):
                 err(f"{env}/{name}: Vault variable {key} given to an application container")
+        if name in ai_agents:
+            want = {"VAULT_MODE": "live", "VAULT_PROXY_URL": f"http://{ai_agents[name]}:8100",
+                    "VAULT_KV_MOUNT": "secret", "VAULT_AI_PREFIX": f"{env}/ai"}
+            for key, value in want.items():
+                if senv.get(key) != value:
+                    err(f"{env}/{name}: {key}={senv.get(key)!r}, expected {value!r}")
         for volume in svc.get("volumes") or []:
             if "approle" in str(volume.get("source", "")):
                 err(f"{env}/{name}: AppRole material mounted into an application container")
+        if "vault" in (svc.get("networks") or {}):
+            err(f"{env}/{name}: only Vault agents may join the vault network")
+    # Each AI agent: an API proxy on its own internal network, shared with exactly one consumer; nothing rendered.
+    for consumer, agent in ai_agents.items():
+        net = agent.removeprefix("vault-agent-")
+        if agent not in app["services"]:
+            err(f"{env}: service {agent} is missing")
+            continue
+        if not (app["networks"].get(net) or {}).get("internal"):
+            err(f"{env}: network {net!r} must exist and be internal")
+        members = {n for n, svc in app["services"].items() if net in (svc.get("networks") or {})}
+        if members != {agent, consumer}:
+            err(f"{env}: network {net!r} must hold exactly {agent} and {consumer} (got {sorted(members)})")
+        if set(app["services"][agent].get("networks") or {}) != {"vault", net}:
+            err(f"{env}/{agent}: must be on the vault and {net} networks only")
+        sources = {str(v.get("source", "")) for v in app["services"][agent].get("volumes") or []}
+        if not any(src.endswith(f"/vault/approle/{net}") for src in sources) or any(
+                "approle" in src and not src.endswith(f"/vault/approle/{net}") for src in sources):
+            err(f"{env}/{agent}: must mount its own AppRole directory (vault/approle/{net}) and no other")
+        if any(src.endswith("-secrets") for src in sources):
+            err(f"{env}/{agent}: renders nothing, so it must not mount a secrets volume")
+        # The listener binds only the agent's fixed address on its AI network, never every interface: otherwise any
+        # container on the shared vault network could use the agent's token.
+        fixed = ((app["services"][agent].get("networks") or {}).get(net) or {}).get("ipv4_address")
+        listen = re.findall(r'^\s*address\s*=\s*"([^"]+)"', Path(f"vault/agent/{net}.hcl").read_text(), re.M)
+        listen = [a for a in listen if not a.startswith("https://")]
+        if not fixed:
+            err(f"{env}/{agent}: needs a fixed ipv4_address on {net}")
+        elif listen != [f"{fixed}:8100"]:
+            err(f"vault/agent/{net}.hcl: the listener must bind {fixed}:8100 only (got {listen}), never 0.0.0.0")
+        if f"-address=http://{fixed}:8100" not in (app["services"][agent].get("healthcheck") or {}).get("test", []):
+            err(f"{env}/{agent}: the healthcheck must call the proxy at http://{fixed}:8100")
 
 if len(names) == 2 and names["staging"] == names["production"]:
     err("staging and production must have different project names")
@@ -257,9 +298,17 @@ echo "==> Vault policies only grant read on their own environment"
 for env in staging production; do
 	other=$([ "$env" = staging ] && echo production || echo staging)
 	grep -q "secret/data/$other/" vault/policies/"$env"/*.hcl && fail "vault/policies/$env references $other"
-	# The one exception: a token may revoke itself (scripts/lib.sh vault_kv, datastores role only).
+	# The exceptions: a token may revoke itself (scripts/lib.sh vault_kv, datastores role only), and the AI key
+	# writer creates new versions of secret/<env>/ai/* (exactly that line, checked below).
 	grep -hE 'capabilities' vault/policies/"$env"/*.hcl | grep -vx 'path "auth/token/revoke-self" { capabilities = \["update"\] }' |
+		grep -vx "path \"secret/data/$env/ai/\*\" { capabilities = \\[\"create\", \"update\"\\] }" |
 		grep -vq '\["read"\]' && fail "vault/policies/$env grants more than read"
+	grep -l '"create", "update"' vault/policies/"$env"/*.hcl | grep -vqx "vault/policies/$env/ai-writer.hcl" &&
+		fail "vault/policies/$env: only the ai-writer role may create or update secrets"
+	[ "$(grep -hE 'capabilities' vault/policies/"$env"/ai-writer.hcl)" = "path \"secret/data/$env/ai/*\" { capabilities = [\"create\", \"update\"] }" ] ||
+		fail "vault/policies/$env/ai-writer.hcl must grant exactly create/update on secret/data/$env/ai/* (never read)"
+	[ "$(grep -hE 'capabilities' vault/policies/"$env"/ai-reader.hcl)" = "path \"secret/data/$env/ai/*\" { capabilities = [\"read\"] }" ] ||
+		fail "vault/policies/$env/ai-reader.hcl must grant exactly read on secret/data/$env/ai/*"
 	grep -l 'revoke-self' vault/policies/"$env"/*.hcl | grep -vqx "vault/policies/$env/datastores.hcl" &&
 		fail "vault/policies/$env: only the datastores role may revoke its own token"
 	grep -qE 'path "secret/(\*|data/\*)' vault/policies/"$env"/*.hcl && fail "vault/policies/$env grants a wildcard"

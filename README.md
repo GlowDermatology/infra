@@ -55,6 +55,7 @@ those repositories only **build, scan and publish images**, then write the new i
 | see what runs | `cat environments/<env>/*/image.env`, or on the server `scripts/manage.sh <env> ps` |
 | run a Django command | `scripts/manage.sh <env> django <command>` on the server |
 | add a provider credential | `scripts/vault/put-secret.sh <env> django ESKIZ_PASSWORD` on the server |
+| rotate the AI assistant's provider key | ops console → AI assistant (superuser); no restart ([secrets](docs/secrets-management.md#ai-provider-keys-secretenvai)) |
 | set up a new server | [`docs/first-server-runbook.md`](docs/first-server-runbook.md) |
 | check everything before a PR | `scripts/validate.sh` |
 

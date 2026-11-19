@@ -8,6 +8,7 @@
 #                                                   └─► backend-api 172.30.0.30:8000  (/api/v1/*)
 #   backend-migrate ─► backend-api / backend-worker / backend-beat ─► postgres, redis   (network "back", no internet)
 #   vault-agent-{backend,frontend,datastores} ─► Vault (separate project, network glowderma-<env>-vault)
+#   backend-api ─► vault-agent-ai-writer (network ai-writer) ─► Vault; backend-worker ─► vault-agent-ai-reader (ai-reader)
 #
 # Every hop inside the stack uses a fixed IPv4 literal on purpose: Django trusts X-Forwarded-For only from the
 # edge's address and accepts /api/v1/admin/* only from the frontend's address. A DNS name could resolve to an
@@ -138,6 +139,48 @@ services:
       test: ["CMD-SHELL", "test -s /run/secrets/postgres_superuser_password && test -s /run/secrets/postgres_app_password && test -s /run/secrets/redis.conf && test -s /run/secrets/redis_password"]
       interval: 5s
       timeout: 3s
+      retries: 3
+      start_period: 120s
+
+  # AI provider keys (secret/<env>/ai/*). Two API proxies instead of templates: each adds its own AppRole token to the
+  # requests of ONE consumer, which reaches it on a private network shared with nobody else. Django writes a new key
+  # version (api, ops console) or reads one (worker) at run time, so a rotation needs no restart, and no
+  # application container ever holds a Vault token or AppRole file. Nothing rendered, no secrets volume.
+  vault-agent-ai-writer:
+    <<: *agent
+    user: "10001:10001"
+    command: ["agent", "-config=/vault/agent/ai-writer.hcl"]
+    volumes:
+      - ../vault/agent:/vault/agent:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/tls/ca.crt:/vault/tls/ca.crt:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/approle/ai-writer:/vault/approle:ro
+    # The listener binds this fixed address only (vault/agent/ai-writer.hcl), so the vault network cannot reach it.
+    networks:
+      vault: {}
+      ai-writer: {ipv4_address: 172.30.4.10}
+    healthcheck:
+      # The proxy listens and Vault answers unsealed (sys/seal-status through the proxy: exit 0 unsealed, 2 sealed).
+      test: ["CMD", "vault", "status", "-address=http://172.30.4.10:8100"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  vault-agent-ai-reader:
+    <<: *agent
+    user: "10001:10001"
+    command: ["agent", "-config=/vault/agent/ai-reader.hcl"]
+    volumes:
+      - ../vault/agent:/vault/agent:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/tls/ca.crt:/vault/tls/ca.crt:ro
+      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/vault/approle/ai-reader:/vault/approle:ro
+    networks:
+      vault: {}
+      ai-reader: {ipv4_address: 172.30.5.10}
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://172.30.5.10:8100"]
+      interval: 10s
+      timeout: 5s
       retries: 3
       start_period: 120s
 
@@ -288,14 +331,23 @@ services:
   backend-api:
     <<: *backend
     command: ["api"]
+    environment:
+      <<: *backend-env
+      # AI provider keys: the ops console writes new versions through the writer agent (no token in Django).
+      VAULT_MODE: live
+      VAULT_PROXY_URL: http://vault-agent-ai-writer:8100
+      VAULT_KV_MOUNT: secret
+      VAULT_AI_PREFIX: ${GLOWDERMA_ENV}/ai
     networks:
       back: {}
       front: {ipv4_address: 172.30.0.30}
+      ai-writer: {}
     volumes:
       - backend-secrets:/run/secrets:ro
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media:/app/media
     depends_on:
       vault-agent-backend: {condition: service_healthy}
+      vault-agent-ai-writer: {condition: service_healthy}
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       object-storage: {condition: service_healthy, required: false}
@@ -306,12 +358,21 @@ services:
   backend-worker:
     <<: *backend
     command: ["worker"]
-    networks: [back, egress]
+    environment:
+      <<: *backend-env
+      # AI provider keys: generation and key tests read versions through the reader agent (no token in Django).
+      # The model API (generativelanguage.googleapis.com) is reached over egress like every other provider.
+      VAULT_MODE: live
+      VAULT_PROXY_URL: http://vault-agent-ai-reader:8100
+      VAULT_KV_MOUNT: secret
+      VAULT_AI_PREFIX: ${GLOWDERMA_ENV}/ai
+    networks: [back, egress, ai-reader]
     volumes:
       - backend-secrets:/run/secrets:ro
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media:/app/media
     depends_on:
       vault-agent-backend: {condition: service_healthy}
+      vault-agent-ai-reader: {condition: service_healthy}
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       object-storage: {condition: service_healthy, required: false}
@@ -427,6 +488,16 @@ networks:
   egress:
     ipam:
       config: [{subnet: 172.30.2.0/24}]
+  # One per AI agent: the agent and its single consumer (backend-api / backend-worker), no route out. The agent has
+  # the fixed .10 (its listener binds only that address); dynamic addresses come from the upper half.
+  ai-writer:
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.4.0/24, ip_range: 172.30.4.128/25}]
+  ai-reader:
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.5.0/24, ip_range: 172.30.5.128/25}]
   # Created by compose/vault.yaml (Vault has its own lifecycle).
   vault:
     external: true
