@@ -193,7 +193,11 @@ www.{$SITE_DOMAIN} {
 	}
 	# A literal order: an address outside the allow-list learns nothing, not even the redirect.
 	route {
-		@denied not remote_ip {$OPS_ALLOWED_IPS:127.0.0.1/32}
+		@denied {
+			# The bare 0.0.0.0 token opts in to all IPv4 and IPv6 clients.
+			not vars_regexp ops_wildcard {env.OPS_ALLOWED_IPS} (^|\s)0\.0\.0\.0(\s|$)
+			not remote_ip {$OPS_ALLOWED_IPS:127.0.0.1/32}
+		}
 		respond @denied 404
 		@root path /
 		redir @root /django-admin/ 302

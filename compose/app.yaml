@@ -65,7 +65,7 @@ x-backend: &backend
     # gunicorn: trust X-Forwarded-Proto only from the edge, so request.is_secure() is true behind TLS.
     FORWARDED_ALLOW_IPS: 172.30.0.10
     OPS_DOMAIN: ${OPS_DOMAIN}
-    OPS_ADMIN_ALLOWED_NETS: ${OPS_ALLOWED_IPS:-127.0.0.1/32}
+    OPS_ALLOWED_IPS: ${OPS_ALLOWED_IPS:-127.0.0.1/32}
     PUBLIC_MEDIA_BASE_URL: https://${SITE_DOMAIN}/media/
     # Media storage: disk or S3 (stack.env). Provider, bucket, endpoint and keys come from Vault (secret/<env>/s3).
     USE_S3: ${USE_S3:?USE_S3 missing (environments/<env>/stack.env)}

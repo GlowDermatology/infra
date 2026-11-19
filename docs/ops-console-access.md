@@ -5,7 +5,7 @@ production: `ops.glowderma.uz`). It edits store settings, contacts and legal tex
 
 | Lock | Where | What it checks |
 |---|---|---|
-| 1. Network | Caddy, then Django again | your IP is in `OPS_ALLOWED_IPS`, otherwise an empty **404** |
+| 1. Network | Caddy, then Django again | your IP is in `OPS_ALLOWED_IPS`, or the list contains the `0.0.0.0` wildcard. Other requests get an empty **404** |
 | 2. Switch | Django | `DJANGO_ADMIN_ENABLED=true` (production default: `false` = 404) |
 | 3. Login | Django | a staff account **and** a TOTP code from your authenticator app |
 
@@ -128,6 +128,11 @@ login page. With Tailscale **off**, the same address gives an empty 404. Both re
 Nothing else, whatever network you are on.
 
 ## Changes later
+
+To reach the console from any IPv4 or IPv6 address, add the bare `0.0.0.0` token to `OPS_ALLOWED_IPS` in
+`/opt/glowderma/runtime/local.env`. Staff login and TOTP are still required. You can leave your specific IPs
+in the space-separated list and remove only `0.0.0.0` when you want to restrict access again. Apply either
+change with **Restart → all** as in step 4. The console can use public DNS in this mode.
 
 | You want to | Do |
 |---|---|

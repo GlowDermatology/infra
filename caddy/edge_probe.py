@@ -252,9 +252,10 @@ def request(
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
     source: str | None = None,
+    address: str = "127.0.0.1",
 ) -> Answer:
     connection = http.client.HTTPConnection(
-        "127.0.0.1", port, timeout=20, source_address=(source, 0) if source else None
+        address, port, timeout=20, source_address=(source, 0) if source else None
     )
     try:
         try:
@@ -655,6 +656,16 @@ def run(caddy: str) -> Probe:
             probe.check(down.status == 502, f"Django down: expected 502, got {down.status}")
             request(port, site, "GET", f"/api/v1/customers/?q={SECRETS['down_phone']}")
             time.sleep(0.5)
+        django.down = False
+        wildcard_dir = workdir / "ops-wildcard"
+        wildcard_dir.mkdir()
+        with running_caddy(
+            caddy, wildcard_dir, api_port, next_port, {"OPS_ALLOWED_IPS": f"{OPS_ALLOWED} 0.0.0.0"}
+        ) as (port, _, _):
+            outside = request(port, ops, "GET", "/django-admin/login/", source=OUTSIDE_ADDRESS)
+            ipv6 = request(port, ops, "GET", "/django-admin/login/", address="::1")
+            probe.check(outside.status == 200, f"ops wildcard: IPv4 expected 200, got {outside.status}")
+            probe.check(ipv6.status == 200, f"ops wildcard: IPv6 expected 200, got {ipv6.status}")
         storage = Upstream(
             objects={STORED_PATH: STORED_BODY}, errors={f"/{BUCKET}/media/products/1/boom.webp": 500}
         )

@@ -139,6 +139,8 @@ for env in ("staging", "production"):
     if edge_env.get("API_UPSTREAM") != f"{api_ip}:8000" or edge_env.get("FRONTEND_UPSTREAM") != f"{next_ip}:3000":
         err(f"{env}: edge upstreams do not match the fixed addresses")
     ops = edge_env.get("OPS_ALLOWED_IPS", "")
+    if not ops or env_api.get("OPS_ALLOWED_IPS") != ops:
+        err(f"{env}: Caddy and Django must receive the same OPS_ALLOWED_IPS")
     if "," in ops:
         err(f"{env}: OPS_ALLOWED_IPS must be space separated (Caddy and Django both split on spaces)")
     # ---- Optional object storage (SeaweedFS). Vault-dependent consistency rules live in scripts/deploy.sh.
