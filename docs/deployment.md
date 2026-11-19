@@ -139,11 +139,44 @@ sudo chown -R 10001:10001 /opt/glowderma/runtime/media
 With an external provider, `aws s3 sync` from that provider (its endpoint and keys) into
 `/opt/glowderma/runtime/media`, owned by 10001, the same way: before the `USE_S3=false` deploy and again after it.
 
+## AI assistant: the two Vault agents (once per server)
+
+The release that adds `vault-agent-ai-writer` and `vault-agent-ai-reader` (secrets-management.md, "AI provider keys")
+needs their policies and AppRoles in each Vault **before** it is deployed: `deploy.sh` stops at its first check
+(`runtime/vault/approle/ai-writer is missing`) and changes nothing until they exist. Staging first, then production;
+the backend release with the assistant can be deployed before or after (it stays off until a key is set).
+
+1. **Before merging**, on each server as root, run `configure.sh` from the PR's files (idempotent; it keeps every
+   existing AppRole credential and adds the two roles, their files and `max_versions`):
+
+   ```bash
+   cd /opt/glowderma/infra && git fetch origin <pr-branch>
+   d="$(mktemp -d)" && git archive FETCH_HEAD | tar -x -C "$d"
+   "$d/scripts/vault/configure.sh" <env>          # asks for an admin token
+   rm -rf "$d"
+   ```
+
+   (Or merge first: the staging deploy then fails at its first check without touching anything; run
+   `scripts/vault/configure.sh staging` on the server, now on the merged commit, and re-run **Deploy staging**.
+   Do production's step before approving its deploy.)
+2. Merge. **Deploy staging** recreates every agent (their config hash changed; each re-renders before its app
+   restarts), starts the two AI agents and recreates api and worker on their new networks.
+3. Check: `scripts/healthcheck.sh staging` lists both AI agents healthy. Then, in the backend's own steps (backend
+   `docs/ops/ai-assistant.md`): `AI_MODE=live` in `secret/staging/django` + **Restart** backend, a superuser enters
+   the key in the ops console, the test passes, the assistant is switched on.
+4. Approve **Deploy production** after doing step 1 there; repeat step 3 on production.
+
+Rollback: revert the merge commit (both deploys run again: the AI agents are removed as orphans, api and worker lose
+`VAULT_MODE=live`, so the assistant answers "not configured"; nothing else changes). The policies, AppRoles and
+stored key versions stay in Vault, harmless and ready for a re-apply. To remove them as well:
+`vault delete auth/approle/role/<env>-ai-{writer,reader}`, `vault policy delete <env>-ai-{writer,reader}` and
+`rm -r /opt/glowderma/runtime/vault/approle/ai-{writer,reader}` (keep `secret/<env>/ai/*` unless the key is retired).
+
 ## What `scripts/deploy.sh` does on the server
 
 1. Refuses if the server is a different environment (`/etc/glowderma/environment`).
 2. Exits without doing anything if an app has no image yet (first days of a new environment).
-3. Checks the Vault TLS and AppRole files exist and the Compose file resolves.
+3. Checks the Vault TLS and AppRole files exist (all five agents) and the Compose file resolves.
 4. Starts Vault if it is stopped (never recreates it) and refuses to continue while it is sealed.
 5. Media preflight: `secret/<env>/s3` must exist in every mode (the backend's `django.json` is rendered from it)
    and, with `OBJECT_STORAGE_ENABLED=true`, `secret/<env>/object-storage` too, or it stops with `run

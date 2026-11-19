@@ -46,9 +46,10 @@ for app in backend frontend; do
 	note "$app: $(image_value "$app" TAG) @ $(image_value "$app" DIGEST)"
 done
 for file in vault/tls/ca.crt vault/tls/vault.crt vault/tls/vault.key \
-	vault/approle/backend/secret_id vault/approle/frontend/secret_id vault/approle/datastores/secret_id; do
+	vault/approle/backend/secret_id vault/approle/frontend/secret_id vault/approle/datastores/secret_id \
+	vault/approle/ai-writer/secret_id vault/approle/ai-reader/secret_id; do
 	dir="$(dirname "$RUNTIME_DIR/$file")"
-	[ -d "$dir" ] || die "$dir is missing: finish docs/first-server-runbook.md first"
+	[ -d "$dir" ] || die "$dir is missing: finish docs/first-server-runbook.md first (on a running server: scripts/vault/configure.sh $ENV as root)"
 	# The AppRole directories are 0500 and owned by the agent's UID: the deploy user cannot look inside. Their
 	# files are then checked by the agents' healthchecks (step 4 waits for every agent to render).
 	[ -x "$dir" ] || continue
@@ -104,7 +105,8 @@ done
 
 log "Starting secrets and datastores"
 app_compose up -d --wait --wait-timeout 300 \
-	vault-agent-backend vault-agent-frontend vault-agent-datastores postgres redis
+	vault-agent-backend vault-agent-frontend vault-agent-datastores vault-agent-ai-writer vault-agent-ai-reader \
+	postgres redis
 
 if [ "$(stack_value OBJECT_STORAGE_ENABLED)" = true ]; then
 	log "Starting the object storage and creating the media bucket"

@@ -156,6 +156,8 @@ install -d -m 0755 "$RUNTIME/vault" "$RUNTIME/vault/tls" "$RUNTIME/vault/approle
 install -d -m 0500 -o 10001 -g 10001 "$RUNTIME/vault/approle/backend"
 install -d -m 0500 -o 1000 -g 1000 "$RUNTIME/vault/approle/frontend"
 install -d -m 0500 -o 999 -g 999 "$RUNTIME/vault/approle/datastores"
+install -d -m 0500 -o 10001 -g 10001 "$RUNTIME/vault/approle/ai-writer"
+install -d -m 0500 -o 10001 -g 10001 "$RUNTIME/vault/approle/ai-reader"
 install -d -m 0700 -o 1000 -g 1000 "$RUNTIME/caddy" "$RUNTIME/caddy/data" "$RUNTIME/caddy/config"
 install -d -m 0755 -o 10001 -g 10001 "$RUNTIME/media"
 # Self-hosted object storage (SeaweedFS, uid 999 like the datastores agent) and the media mirror.

@@ -5,7 +5,8 @@
 #   scripts/vault/configure.sh <env>
 #
 # Sets up: KV v2 at secret/, the file audit device, the policies, AppRole auth with one role per agent
-# (backend, frontend, datastores), their role_id/secret_id files, and a snapshot-only token for backups.
+# (backend, frontend, datastores, ai-writer, ai-reader), their role_id/secret_id files, max_versions of the AI
+# provider keys, and a snapshot-only token for backups.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 use_env "${1:-}"
 [ "$(id -u)" -eq 0 ] || die "run as root"
@@ -19,7 +20,7 @@ vault_cli audit list -format=json 2>/dev/null | grep -q '"file/"' ||
 	vault_cli audit enable file file_path="${AUDIT_FILE_PATH:-/vault/logs/audit.log}"
 
 log "Policies from vault/policies/$ENV/"
-for policy in backend frontend datastores; do
+for policy in backend frontend datastores ai-writer ai-reader; do
 	vault_cli policy write "$ENV-$policy" - <"$INFRA_DIR/vault/policies/$ENV/$policy.hcl" >/dev/null
 done
 printf 'path "sys/storage/raft/snapshot" { capabilities = ["read"] }\n' |
@@ -27,8 +28,9 @@ printf 'path "sys/storage/raft/snapshot" { capabilities = ["read"] }\n' |
 
 log "AppRole auth and one role per agent"
 vault_cli auth list -format=json | grep -q '"approle/"' || vault_cli auth enable approle
-declare -A uid=([backend]=10001 [frontend]=1000 [datastores]=999)
-for role in backend frontend datastores; do
+# The two AI agents render nothing: they run as the backend's UID only to own their AppRole files.
+declare -A uid=([backend]=10001 [frontend]=1000 [datastores]=999 [ai-writer]=10001 [ai-reader]=10001)
+for role in backend frontend datastores ai-writer ai-reader; do
 	vault_cli write "auth/approle/role/$ENV-$role" token_policies="$ENV-$role" \
 		token_ttl=1h token_max_ttl=24h secret_id_ttl=0 secret_id_num_uses=0 token_no_default_policy=true >/dev/null
 	dir="$RUNTIME_DIR/vault/approle/$role"
@@ -46,6 +48,12 @@ for role in backend frontend datastores; do
 		note "$role: credentials already present (scripts/vault/rotate-approle-secret-id.sh to rotate)"
 	fi
 done
+
+# Every key rotation in the ops console writes a version, and a failed key test leaves one unused: keep enough that
+# the active and the previous version are never pruned (backend docs/ops/ai-assistant.md). Settings only, no value.
+log "AI provider keys: max_versions on secret/$ENV/ai/gemini"
+# One line per provider path (today: gemini).
+vault_cli kv metadata put -mount=secret -max-versions=20 "$ENV/ai/gemini" >/dev/null
 
 log "Snapshot token for the nightly backup"
 token_file="$RUNTIME_DIR/vault/snapshot-token"

@@ -24,6 +24,7 @@ no network, no database, no Vault. The only shared thing is this repository's te
 │                       │      │ worker ──────┼─► egress     │             │                           │
 │   memory-only secret files (tmpfs volumes, read-only in the consumer)                                │
 │        ▲ vault-agent-frontend   ▲ vault-agent-backend   ▲ vault-agent-datastores                     │
+│   api ─► vault-agent-ai-writer (net ai-writer)   worker ─► vault-agent-ai-reader (net ai-reader)     │
 └────────┼────────────────────────┼───────────────────────┼────────────────────────────────────────────┘
          └────────────────────────┴───────────────────────┴── network glowderma-<env>-vault (internal)
                                                               project glowderma-<env>-vault: Vault (Raft, TLS)
@@ -61,6 +62,7 @@ addresses in `compose/app.yaml` and the Django/gunicorn gates agree.
 | `object-storage` | seaweedfs 4.53 (optional: `OBJECT_STORAGE_ENABLED=true`) | 999 | S3 API for media on `back` (`object-storage:8333`) and `front` (Caddy reads); identities from the datastores agent, in their own secrets volume. Only the S3 port listens off-container (master, volume, filer on 127.0.0.1) |
 | `object-storage-init` | aws-cli 2.40 | 999 | one-shot (`deploy.sh`): creates the bucket. The nightly backup also runs it for the mirror |
 | `vault-agent-*` | vault 2.2.1 | consumer's UID | render secrets for one consumer group |
+| `vault-agent-ai-{writer,reader}` | vault 2.2.1 | 10001 | API proxy (own AppRole token) for the AI provider keys: api writes versions, worker reads them |
 | `vault` (own project) | vault 2.2.1 | 100 | secrets, Raft storage, TLS, audit log |
 
 All containers: read-only root filesystem, every capability dropped, `no-new-privileges`, explicit non-root
@@ -88,6 +90,13 @@ operator (on the server) ──vault kv put──► Vault ──AppRole login�
                                                        Django: config/secrets.py loads django.json ◄──┤
                                                        Next:   entrypoint.mjs loads frontend.json  ◄──┤
                                                        Postgres: *_PASSWORD_FILE, Redis: redis.conf ◄─┘
+```
+
+AI provider keys are the exception: read and written at run time, through an agent API proxy, never rendered:
+
+```
+ops console (api) ──new key──► vault-agent-ai-writer ──► Vault secret/<env>/ai/gemini version N (inactive)
+worker ──?version=N──► vault-agent-ai-reader ──► test with the provider ──► PostgreSQL: active = N
 ```
 
 Details: [secrets-management.md](secrets-management.md).

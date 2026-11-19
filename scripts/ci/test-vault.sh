@@ -40,7 +40,7 @@ allowed() {
 }
 for env in staging production; do
 	other=$([ "$env" = staging ] && echo production || echo staging)
-	for role in backend frontend datastores; do
+	for role in backend frontend datastores ai-writer ai-reader; do
 		dir="$work/rt-$env/vault/approle/$role"
 		token="$(VAULT_TOKEN=root "$vault" write -field=token auth/approle/login role_id="$(cat "$dir/role_id")" secret_id="$(cat "$dir/secret_id")")"
 		for path in django frontend shared db-app redis postgres s3 object-storage; do
@@ -75,6 +75,84 @@ for env in staging production; do
 	check "$env datastores: the one-off token can revoke itself and is dead afterwards" \
 		"VAULT_TOKEN=$dtoken $vault token revoke -self >/dev/null && ! VAULT_TOKEN=$dtoken $vault kv get -mount=secret -field=S3_BUCKET_NAME $env/s3 >/dev/null 2>&1"
 done
+
+# AI provider keys (secret/<env>/ai/*): the real ai-writer and ai-reader agents (repo configs, API proxy), called the
+# way Django calls them: plain HTTP, no token of its own. The writer only creates versions, the reader only reads.
+for role in ai-writer ai-reader; do
+	port=$([ "$role" = ai-writer ] && echo 18301 || echo 18302)
+	sed -e "s#https://vault:8200#$VAULT_ADDR#" -e '/ca_cert/d' -e "s#172\.30\.[45]\.10:8100#127.0.0.1:$port#" \
+		-e "s#/vault/approle#$work/rt-staging/vault/approle/$role#g" -e "s#/tmp/agent.pid#$work/$role.pid#" \
+		"$here/vault/agent/$role.hcl" >"$work/$role.hcl"
+	grep -qF "127.0.0.1:$port" "$work/$role.hcl" || { echo "FAIL: $role.hcl listener address not substituted" >&2; exit 1; }
+	VAULT_TOKEN='' timeout 90 "$vault" agent -config="$work/$role.hcl" >"$work/agent-$role.log" 2>&1 &
+done
+# proxy <writer|reader> <METHOD> <path below /v1/> [json body]: prints the HTTP status, then the body (0 = no
+# answer). Bypasses any HTTP proxy of the environment. It sends the root token on purpose: the agents must
+# replace a client's token with their own (use_auto_auth_token = "force"), so every grant below is the role's.
+cat >"$work/proxy.py" <<'PYEOF'
+import sys, urllib.error, urllib.request
+role, method, path = sys.argv[1:4]
+port = 18301 if role == "writer" else 18302
+body = sys.argv[4].encode() if len(sys.argv) > 4 else None
+req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/{path}", data=body, method=method,
+                             headers={"Content-Type": "application/json", "X-Vault-Token": "root"})
+try:
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as r:
+        print(r.status)
+        print(r.read().decode())
+except urllib.error.HTTPError as e:
+    print(e.code)
+    print(e.read().decode())
+except OSError:
+    print(0)
+PYEOF
+proxy() { python3 -I "$work/proxy.py" "$@"; }
+status() { proxy "$@" | head -1; }
+json_field() { sed -n 2p | python3 -I -c "import json,sys; d=json.load(sys.stdin); print(d$1)" 2>/dev/null || true; }
+key1="ai-test-key-$(openssl rand -hex 8)"
+key2="ai-test-key-$(openssl rand -hex 8)"
+for _ in $(seq 60); do # until the writer agent has logged in
+	v1="$(proxy writer POST secret/data/staging/ai/gemini "{\"data\": {\"api_key\": \"$key1\"}}")"
+	[ "$(head -1 <<<"$v1")" = 200 ] && break
+	sleep 0.5
+done
+v2="$(proxy writer POST secret/data/staging/ai/gemini "{\"data\": {\"api_key\": \"$key2\"}}")"
+for _ in $(seq 60); do # until the reader agent has logged in
+	[ "$(status reader GET secret/data/staging/ai/gemini)" = 200 ] && break
+	sleep 0.5
+done
+n1="$(json_field '["data"]["version"]' <<<"$v1")"
+n2="$(json_field '["data"]["version"]' <<<"$v2")"
+r1="$(proxy reader GET 'secret/data/staging/ai/gemini?version=1' | json_field '["data"]["data"]["api_key"]')"
+r2="$(proxy reader GET secret/data/staging/ai/gemini | json_field '["data"]["data"]["api_key"]')"
+check "ai-writer creates a version and learns its number (got ${n1:-none})" "[ '$n1' = 1 ]"
+check "ai-writer creates the next version, a rotation (got ${n2:-none})" "[ '$n2' = 2 ]"
+check "ai-reader reads a given version (the test of a pending key)" "[ '$r1' = '$key1' ]"
+check "ai-reader reads the latest version" "[ '$r2' = '$key2' ]"
+for denied in \
+	"writer GET secret/data/staging/ai/gemini" "writer GET secret/data/staging/ai/gemini?version=1" \
+	"writer GET secret/metadata/staging/ai/gemini" "writer LIST secret/metadata/staging/ai" \
+	"writer DELETE secret/data/staging/ai/gemini" "writer POST secret/destroy/staging/ai/gemini" \
+	"writer POST secret/metadata/staging/ai/gemini" "writer POST secret/data/staging/django" \
+	"writer POST secret/data/production/ai/gemini" "writer POST auth/approle/role/staging-ai-writer/secret-id" \
+	"reader POST secret/data/staging/ai/gemini" "reader GET secret/metadata/staging/ai/gemini" \
+	"reader DELETE secret/data/staging/ai/gemini" "reader GET secret/data/staging/django" \
+	"reader GET secret/data/production/ai/gemini" "reader GET sys/mounts"; do
+	read -r who method path <<<"$denied"
+	if [ "$method" = POST ]; then
+		got="$(status "$who" "$method" "$path" '{"data": {"api_key": "x"}, "versions": [1], "max_versions": 1}')"
+	else
+		got="$(status "$who" "$method" "$path")"
+	fi
+	check "ai-$who $method $path is denied (got $got)" "[ '$got' = 403 ]"
+done
+check "the agent logs never contain a key" "! grep -qF -e '$key1' -e '$key2' '$work/agent-ai-writer.log' '$work/agent-ai-reader.log'"
+for env in staging production; do
+	mv="$(VAULT_TOKEN=root "$vault" kv metadata get -format=json -mount=secret "$env/ai/gemini" |
+		python3 -I -c 'import json,sys; print(json.load(sys.stdin)["data"]["max_versions"])' 2>/dev/null || true)"
+	check "$env/ai/gemini keeps 20 versions (max_versions, got ${mv:-none})" "[ '$mv' = 20 ]"
+done
+pkill -f "$work/ai-.*\.hcl" 2>/dev/null || true
 
 # Real agents render every template.
 for role in backend frontend datastores; do
