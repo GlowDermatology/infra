@@ -1,4 +1,4 @@
-# Every infra commit to main that touches staging or shared files deploys staging automatically.
+# A staging image-pin update on main starts validation and deployment.
 # A commit whose message contains [scan-policy:report] (a rollback promotion) scans without blocking.
 name: Deploy staging
 
@@ -6,12 +6,8 @@ on:
   push:
     branches: [main]
     paths:
-      - environments/staging/**
-      - compose/**
-      - caddy/**
-      - vault/**
-      - postgres/**
-      - scripts/**
+      - environments/staging/backend/image.env
+      - environments/staging/frontend/image.env
   workflow_dispatch:
     inputs:
       scan_policy:
@@ -28,9 +24,6 @@ jobs:
       packages: read
       security-events: write
     uses: ./.github/workflows/_deploy.yaml
-    # Required even for ENVIRONMENT secrets: a reusable workflow sees no secret its caller does not pass,
-    # environment: on its job notwithstanding (variables are not affected). Without it VPS_SSH_KEY is empty.
-    secrets: inherit
     with:
       environment: staging
       scan_policy: ${{ inputs.scan_policy || (contains(github.event.head_commit.message, '[scan-policy:report]') && 'report' || 'enforce') }}

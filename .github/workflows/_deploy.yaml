@@ -1,10 +1,11 @@
 # Reusable deploy of one environment, called by deploy-staging.yaml and deploy-production.yaml.
-#   1. full image scan of BOTH digests named in environments/<env>/*/image.env, with a fresh vulnerability DB
-#   2. deploy over SSH: the server's deploy gate (scripts/deploy-gate.sh, the key's forced command) checks out
+#   1. validate the infrastructure configuration and workflows
+#   2. full image scan of BOTH digests named in environments/<env>/*/image.env, with a fresh vulnerability DB
+#   3. deploy over SSH: the server's deploy gate (scripts/deploy-gate.sh, the key's forced command) checks out
 #      exactly this infra commit, if it is on main, and runs scripts/deploy.sh, pulling the private GHCR images
 #      with this job's short-lived GITHUB_TOKEN (the server stores no registry credential)
-# Job 2 runs in the GitHub environment <env> (its secrets VPS_HOST, VPS_USERNAME, VPS_SSH_KEY resolve there,
-# which only works because the callers use `secrets: inherit`); production waits for a required reviewer.
+# The SSH job reads VPS_HOST, VPS_USERNAME and VPS_SSH_KEY from its GitHub environment.
+# Production waits for a required reviewer.
 name: Deploy (reusable)
 
 on:
@@ -22,8 +23,15 @@ on:
 permissions: {}
 
 jobs:
+  validate:
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/validate.yaml
+
   image-scan:
     name: Pre-deploy image scan (${{ inputs.environment }})
+    needs: validate
     runs-on: ubuntu-24.04
     permissions:
       contents: read

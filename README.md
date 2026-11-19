@@ -22,7 +22,8 @@ those repositories only **build, scan and publish images**, then write the new i
 1. **An environment = one folder + one server.** `environments/staging/` and `environments/production/` hold
    the public settings and the exact image digests. Each server knows its own name (`/etc/glowderma/environment`)
    and every script refuses to act on the other one.
-2. **Git is the deploy history.** A deploy happens because a commit changed an `image.env` (or a shared file).
+2. **Git is the deploy history.** Staging deploys on staging image-pin updates or a manual run. Production also
+   starts a deploy on shared runtime changes and requires approval.
    `git log environments/production/backend/image.env` is the list of every production backend release.
 3. **Secrets live in Vault on each server**, never in GitHub or in this repository. Vault Agent sidecars render
    them into memory-only files for each container. GitHub holds only SSH access and one push token.

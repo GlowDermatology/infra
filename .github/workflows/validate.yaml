@@ -1,14 +1,20 @@
-# Static checks of the infra repository on every push and pull request. Nothing here touches a server.
+# Static checks for pull requests, other pushes, and the deploy pipeline.
 name: Validate
 
 on:
   push:
+    paths-ignore:
+      - environments/staging/backend/image.env
+      - environments/staging/frontend/image.env
+      - environments/production/backend/image.env
+      - environments/production/frontend/image.env
   pull_request:
+  workflow_call:
 
 permissions: {}
 
 concurrency:
-  group: validate-${{ github.ref }}
+  group: validate-${{ github.workflow == 'Validate' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:

@@ -27,9 +27,9 @@ Pull requests run the security stages, the tests and a build without push.
 
 | Workflow | Trigger | Does |
 |---|---|---|
-| `validate` | every push / PR | compose for both envs, structural rules, Caddy edge probe, Vault end-to-end test, actionlint, zizmor, shellcheck, gitleaks, semgrep, trivy config |
-| `deploy-staging` | push to `main` touching `environments/staging/**` or shared files; manual | pre-deploy image scan → `scripts/deploy.sh staging` over SSH |
-| `deploy-production` | same for production; manual | pre-deploy image scan → **approval** → `scripts/deploy.sh production` |
+| `validate` | pull requests, pushes that change files other than image pins, and as part of each deploy | compose for both envs, structural rules, Caddy edge probe, Vault end-to-end test, actionlint, zizmor, shellcheck, gitleaks, semgrep, trivy config |
+| `deploy-staging` | push to `main` changing `environments/staging/backend/image.env` or `environments/staging/frontend/image.env`; manual | validation → pre-deploy image scan → `scripts/deploy.sh staging` over SSH |
+| `deploy-production` | push to `main` touching `environments/production/**` or shared runtime files; manual | validation → pre-deploy image scan → **approval** → `scripts/deploy.sh production` |
 | `promote` | manual | copies staging's release into `environments/production/` (verified), commits |
 | `bootstrap-server` | manual | prepares a fresh Ubuntu server |
 | `rescan-deployed` | weekly, manual | scans what both environments run today; opens an issue on new fixable CVEs |
@@ -44,8 +44,10 @@ Pull requests run the security stages, the tests and a build without push.
    by the app's `ci.yml` on `main`), and commits `promote(production): backend-a3f2e1b` here. The backend is
    promoted **by digest** (byte-for-byte what staging tested). The frontend gets its sibling image built from
    the same commit with the production domain baked in.
-4. **Deploy production** starts and waits: open the run, *Review deployments*, approve. Only then does it scan
-   both images again with today's vulnerability data and deploy.
+4. **Deploy production** validates the infra and scans both images again. When it requests approval, open the
+   run, select *Review deployments*, and approve.
+
+To apply a staging infrastructure change without updating an image pin, run **Deploy staging** manually from `main`.
 
 ## Rollback
 
