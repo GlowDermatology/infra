@@ -87,7 +87,7 @@ rendered by the datastores agent from `s3` (the `app` pair) and `object-storage`
   `stack.env` (a PR): `restart.sh`, the deploy and the backup refuse the mix (docs/deployment.md).
   For an external provider also set `PUBLIC_MEDIA_BASE_URL` there.
 - The frontend's `GLOWDERMA_MEDIA_HOSTS` is build-time: a new image host still needs a frontend rebuild.
-- Never put `USE_S3` or `S3_LOCATION` in `secret/<env>/s3`: they are topology keys (`stack.env`) and the backend
+- Never put `S3_LOCATION` in `secret/<env>/s3`: it is a topology key (`stack.env`) and the backend
   refuses to start when the secrets file carries them.
 - Existing environments: rerun `scripts/vault/generate-app-secrets.sh <env>` before deploying this release (it only
   creates the missing `s3` and `object-storage` paths).

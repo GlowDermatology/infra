@@ -67,8 +67,7 @@ x-backend: &backend
     OPS_DOMAIN: ${OPS_DOMAIN}
     OPS_ALLOWED_IPS: ${OPS_ALLOWED_IPS:-127.0.0.1/32}
     PUBLIC_MEDIA_BASE_URL: https://${SITE_DOMAIN}/media/
-    # Media storage: disk or S3 (stack.env). Provider, bucket, endpoint and keys come from Vault (secret/<env>/s3).
-    USE_S3: ${USE_S3:?USE_S3 missing (environments/<env>/stack.env)}
+    # S3 provider, bucket, endpoint and keys come from Vault (secret/<env>/s3).
     S3_LOCATION: ${S3_LOCATION:?S3_LOCATION missing (environments/<env>/stack.env)}
     PAYMENT_RETURN_URL: https://${SITE_DOMAIN}/pay/return
     PAYMENT_WEB_RETURN_URL: https://${SITE_DOMAIN}{locale_prefix}/buyurtmalar/{order_id}?paid=1
@@ -344,7 +343,6 @@ services:
       ai-writer: {}
     volumes:
       - backend-secrets:/run/secrets:ro
-      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media:/app/media
     depends_on:
       vault-agent-backend: {condition: service_healthy}
       vault-agent-ai-writer: {condition: service_healthy}
@@ -369,7 +367,6 @@ services:
     networks: [back, egress, ai-reader]
     volumes:
       - backend-secrets:/run/secrets:ro
-      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media:/app/media
     depends_on:
       vault-agent-backend: {condition: service_healthy}
       vault-agent-ai-reader: {condition: service_healthy}
@@ -444,9 +441,7 @@ services:
       OPS_ALLOWED_IPS: ${OPS_ALLOWED_IPS:-127.0.0.1/32}
       API_UPSTREAM: 172.30.0.30:8000
       FRONTEND_UPSTREAM: 172.30.0.20:3000
-      # /media/*: from the disk volume, or from the stack's own object storage (MEDIA_BACKEND is set by
-      # scripts/lib.sh app_compose from OBJECT_STORAGE_ENABLED and USE_S3).
-      MEDIA_BACKEND: ${MEDIA_BACKEND:?MEDIA_BACKEND is set by scripts/lib.sh (app_compose)}
+      OBJECT_STORAGE_ENABLED: ${OBJECT_STORAGE_ENABLED:?OBJECT_STORAGE_ENABLED missing (environments/<env>/stack.env)}
       OBJECT_STORAGE_UPSTREAM: 172.30.0.40:8333
       OBJECT_STORAGE_BUCKET: glowderma-media
       S3_LOCATION: ${S3_LOCATION:?S3_LOCATION missing (environments/<env>/stack.env)}
@@ -454,7 +449,6 @@ services:
       - ../caddy:/etc/caddy:ro
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/caddy/data:/data
       - ${RUNTIME_DIR:-/opt/glowderma/runtime}/caddy/config:/config
-      - ${RUNTIME_DIR:-/opt/glowderma/runtime}/media:/srv/media:ro
     tmpfs: ["/tmp"]
     networks:
       front: {ipv4_address: 172.30.0.10, ipv6_address: "fd00:6764:0:1::10"}

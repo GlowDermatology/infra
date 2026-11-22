@@ -12,7 +12,7 @@
 #      with OBJECT_STORAGE_ENABLED=true the object storage starts here and its bucket is created.
 #      If the backend image changes: pre-deploy database dump, stop the writers, run migrations (one process)
 #   5. `up -d` the whole stack and wait until every service is healthy; a disabled object storage is removed
-#   6. reload Caddy (zero downtime), smoke test, media_storage_check (USE_S3=true), record what is deployed, prune old images
+#   6. reload Caddy (zero downtime), smoke test, media_storage_check, record what is deployed, prune old images
 #
 # Needs Docker Compose >= 2.20 on the server (`depends_on ... required: false` for the optional object storage).
 # Never destructive: no `down`, no `-v`, no volume or network removal. Rolling back = deploying an older
@@ -142,14 +142,12 @@ if ! app_compose up -d --remove-orphans --wait --wait-timeout 600; then
 fi
 # `--remove-orphans` keeps the containers of a service whose profile is off: with OBJECT_STORAGE_ENABLED=false a
 # previously started object storage would keep running. Stop and remove the container; its data stays in
-# runtime/object-storage. With USE_S3=true the backend may still run on it (`up` did not recreate it: its own
+# runtime/object-storage. The backend may still run on it (`up` did not recreate it: its own
 # config did not change), so first move it to the provider now in secret/<env>/s3: restart.sh renders django.json
 # afresh, recreates the backend and runs media_storage_check.
 if [ "$(stack_value OBJECT_STORAGE_ENABLED)" != true ] && [ -n "$(app_compose ps -a -q object-storage)" ]; then
-	if [ "$(stack_value USE_S3)" = true ]; then
-		log "Object storage disabled: restarting the backend on the provider in secret/$ENV/s3"
-		"$INFRA_DIR/scripts/restart.sh" "$ENV" backend
-	fi
+	log "Object storage disabled: restarting the backend on the provider in secret/$ENV/s3"
+	"$INFRA_DIR/scripts/restart.sh" "$ENV" backend
 	log "Object storage disabled: removing its container (data kept in $RUNTIME_DIR/object-storage)"
 	app_compose rm -s -f object-storage
 fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Backups of one environment. Run as root on its server.
 #
-#   scripts/backup.sh <env> nightly      database + media (disk, or a mirror of the object storage; nothing for an
+#   scripts/backup.sh <env> nightly      database + media (a mirror of bundled object storage; nothing for an
 #                                        external S3 provider) + Vault snapshot, prune old local files, copy off-host
 #                                        (cron: /etc/cron.d/glowderma-backup, installed by bootstrap-server.sh)
 #   scripts/backup.sh <env> pre-deploy   database only, before a release that changes the backend (deploy.sh)
@@ -59,19 +59,19 @@ pending=""
 finish "$db"
 
 if [ "$label" = nightly ]; then
-	# Media: on disk, mirrored out of the stack's object storage, or an external provider (not our data).
+	# Media: mirror the stack's object storage when enabled.
 	media_src=""
 	media_error=""
 	# The mirror follows stack.env; Django follows secret/<env>/s3. If they disagree (a Vault-only switch to another
 	# provider), mirroring the stack's bucket would back up a stale copy without a word: refuse it loudly instead and
 	# still finish the database and Vault backups (the script then exits non-zero).
-	if [ "$(media_backend)" = object-storage ] && ! (
+	if [ "$(stack_value OBJECT_STORAGE_ENABLED)" = true ] && ! (
 		secret_must_exist s3 S3_BUCKET_NAME
 		own_storage_endpoint_check
 	); then
 		media_error="media NOT backed up: Django does not use the stack's object storage (see the error above)"
 		echo "ERROR: $media_error" >&2
-	elif [ "$(media_backend)" = object-storage ]; then
+	elif [ "$(stack_value OBJECT_STORAGE_ENABLED)" = true ]; then
 		# Admin keys are read from files inside the container (as in object-storage/init.sh), never put in argv.
 		app_compose --profile object-storage-tools run --rm --no-deps -T -e MEDIA_LOCATION="$(stack_value S3_LOCATION)" \
 			--entrypoint sh object-storage-init -c '
@@ -86,10 +86,8 @@ if [ "$label" = nightly ]; then
 			exec aws --endpoint-url http://object-storage:8333 s3 sync "s3://glowderma-media/$MEDIA_LOCATION" /mirror --delete --only-show-errors' ||
 			die "object storage mirror failed"
 		media_src="$RUNTIME_DIR/media-mirror"
-	elif [ "$(stack_value USE_S3)" = true ]; then
-		echo "media: external provider, not backed up here"
 	else
-		media_src="$RUNTIME_DIR/media"
+		echo "media: external provider, not backed up here"
 	fi
 	if [ -n "$media_src" ]; then
 		media="$backup_dir/$ENV-media-$stamp.tar.gz"

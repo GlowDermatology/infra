@@ -8,13 +8,13 @@ no admin endpoint) and test host names (site.test, www.site.test, ops.test). API
 point at two different stubs, so every check knows whether Django or Next received a request. The ops console's
 allow-list is 127.0.0.1 only; a request from 127.0.0.2 plays a browser outside it.
 
-A third stub plays the object storage (SeaweedFS). The media checks run twice: with MEDIA_BACKEND=disk in the main
-Caddy, then in a second Caddy with MEDIA_BACKEND=object-storage, where /media/* must be fetched from
+A third stub plays the object storage (SeaweedFS). The media checks run twice: with bundled storage disabled in the main
+Caddy, then in a second Caddy with bundled storage enabled, where /media/* must be fetched from
 /glowderma-media/media/... on that stub and nowhere else (GET and HEAD only, no listing, no traversal, no query
 string, no credential forwarded, no Server or X-Amz-* header back).
 
 Checks (same origin): /api/v1/* reaches Django and nothing else does; Next keeps its own /api/shop/* and
-/api/revalidate; the staff-only Django paths answer 404 at the edge; /media/ is served from disk; body limits;
+/api/revalidate; the staff-only Django paths answer 404 at the edge; /media/ returns 404 with bundled storage disabled; body limits;
 X-Forwarded-For is overwritten; no Server/Via header and HSTS everywhere; www redirects; the ops console gate;
 a trickling client never reaches Django; server timeouts; and no secret or personal value from a query string,
 a Referer or a token header appears in the access or error log, including the error line of a 502.
@@ -185,9 +185,6 @@ def running_caddy(
     port = free_port()
     config = workdir / "Caddyfile"
     config.write_text(probe_caddyfile(port), encoding="utf-8")
-    media = workdir / "media"
-    media.mkdir()
-    (media / "a.txt").write_text("media", encoding="utf-8")
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(workdir),
@@ -196,9 +193,8 @@ def running_caddy(
         "ACME_EMAIL": "probe@example.invalid",
         "API_UPSTREAM": f"127.0.0.1:{api_port}",
         "FRONTEND_UPSTREAM": f"127.0.0.1:{next_port}",
-        "MEDIA_ROOT": str(media),
         "OPS_ALLOWED_IPS": OPS_ALLOWED,
-        "MEDIA_BACKEND": "disk",
+        "OBJECT_STORAGE_ENABLED": "false",
         **HOSTS,
         **(extra_env or {}),
     }
@@ -371,10 +367,8 @@ def check_ops_host(probe: Probe, port: int, ops: str, upstream: Upstream) -> Non
     before = len(upstream.paths())
     media = request(port, ops, "GET", "/media/a.txt")
     probe.check(
-        media.status == 200
-        and media.body == b"media"
-        and media.headers.get("x-content-type-options") == "nosniff",
-        f"ops: /media/ (the console's image previews) expected 200 with nosniff, got {media.status}",
+        media.status == 404 and media.headers.get("cache-control") == "no-store",
+        f"ops: /media/ (the console's image previews) expected 404 with no-store, got {media.status}",
     )
     probe.check("/media/a.txt" not in upstream.paths()[before:], "ops: /media/ reached the upstream")
     photo = request(
@@ -410,7 +404,7 @@ def check_ops_host(probe: Probe, port: int, ops: str, upstream: Upstream) -> Non
 
 
 def check_object_storage_media(probe: Probe, port: int, host: str, label: str, storage: Upstream) -> None:
-    """MEDIA_BACKEND=object-storage: /media/* is fetched from /glowderma-media/media/... and never from anywhere
+    """Bundled SeaweedFS: /media/* is fetched from /glowderma-media/media/... and never from anywhere
     else in the bucket, and only by GET and HEAD. ``label`` names the host in messages."""
     is_ops = label == "ops"
     with storage.lock:
@@ -635,8 +629,8 @@ def run(caddy: str) -> Probe:
             before = len(django.paths()) + len(nxt.paths())
             media = request(port, site, "GET", "/media/a.txt")
             probe.check(
-                media.status == 200 and media.body == b"media" and media.headers.get("x-content-type-options") == "nosniff",
-                f"/media/: expected 200 with nosniff, got {media.status}",
+                media.status == 404 and media.headers.get("cache-control") == "no-store",
+                f"/media/: expected 404 with no-store, got {media.status}",
             )
             probe.check(len(django.paths()) + len(nxt.paths()) == before, "/media/ reached an upstream")
             check_ops_host(probe, port, ops, django)
@@ -671,11 +665,10 @@ def run(caddy: str) -> Probe:
         )
         storage_server = stub_server(storage)
         object_env = {
-            "MEDIA_BACKEND": "object-storage",
+            "OBJECT_STORAGE_ENABLED": "true",
             "OBJECT_STORAGE_UPSTREAM": f"127.0.0.1:{storage.port}",
             "OBJECT_STORAGE_BUCKET": BUCKET,
             "S3_LOCATION": "media",
-            "MEDIA_ROOT": str(workdir / "unused-media-root"),
         }
         object_dir = workdir / "object-storage-mode"
         object_dir.mkdir()

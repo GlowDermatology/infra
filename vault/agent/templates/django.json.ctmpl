@@ -1,7 +1,7 @@
 {{- /* Every key of secret/<env>/django becomes an environment variable of the Django processes
        (config/secrets.py loads this file before the settings read os.environ). The shared and
        datastore credentials are composed below, so each value is stored in Vault exactly once. secret/<env>/s3 is ranged the same way (keys are env var
-       names); USE_S3 and S3_LOCATION are topology keys the backend refuses here, so never store them. */ -}}
+       names); S3_LOCATION is a topology key the backend refuses here, so never store it. */ -}}
 {{- $env := env "GLOWDERMA_ENV" -}}
 {
 {{- with secret (printf "secret/data/%s/django" $env) }}{{ range $key, $value := .Data.data }}

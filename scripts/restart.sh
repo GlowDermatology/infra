@@ -10,7 +10,7 @@
 #
 # For the backend it first runs the deploy's media preflight (secret/<env>/s3 against stack.env: a Vault-only switch
 # away from the stack's own object storage is refused, it needs OBJECT_STORAGE_ENABLED=false), and afterwards, with
-# USE_S3=true, media_storage_check: a provider change that Django cannot use fails loudly here.
+# media_storage_check: a provider change that Django cannot use fails loudly here.
 #
 # Order matters. The rendered file lives in a tmpfs volume that survives an agent restart, so the old file is
 # removed first; the agent is healthy again only once it has rendered a fresh one from Vault, and only then are

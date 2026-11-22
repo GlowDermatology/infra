@@ -36,7 +36,7 @@ no network, no database, no Vault. The only shared thing is this repository's te
 |---|---|---|
 | `/api/v1/*` | Django (`backend-api`) | customer API, health, provider webhooks, POS |
 | `/api/v1/admin/*`, `/api/v1/schema/*`, `/api/v1/docs/*`, `/api/v1/dev/*`, `/django-admin*` | 404 at the edge | staff surfaces: only the Next server calls them, over the private network |
-| `/media/*` | files on disk, or the object storage | uploaded images. `USE_S3=false`: files in `runtime/media` served by Caddy. `USE_S3=true` with `OBJECT_STORAGE_ENABLED=true`: Caddy proxies GET/HEAD to the stack's SeaweedFS (`object-storage`, `172.30.0.40:8333` on `front`). `USE_S3=true` with an external provider: Caddy is not involved, images load from `PUBLIC_MEDIA_BASE_URL` |
+| `/media/*` | bundled SeaweedFS | uploaded images. With `OBJECT_STORAGE_ENABLED=true`, Caddy proxies GET/HEAD to the stack's SeaweedFS (`object-storage`, `172.30.0.40:8333` on `front`). With an external provider, Caddy is not involved, images load from `PUBLIC_MEDIA_BASE_URL` |
 | everything else | Next.js | storefront, `/admin` panel, Next's own `/api/shop/*` and `/api/revalidate` |
 | `https://www.<SITE_DOMAIN>` | 308 to the apex | |
 | `https://<OPS_DOMAIN>/django-admin/` | Django ops console | only from `OPS_ALLOWED_IPS` (Tailscale device IPs, [ops-console-access.md](ops-console-access.md)), 404 for everyone else |
@@ -74,7 +74,6 @@ user, memory and PID limits, health checks, json-file logs capped at 100 MB per 
 |---|---|---|
 | PostgreSQL | named volume `glowderma-<env>_pgdata` | `backup.sh` (nightly + before each backend release) |
 | Redis | named volume `glowderma-<env>_redisdata` | not backed up: cache + in-flight tasks only |
-| uploaded media (`USE_S3=false`) | `/opt/glowderma/runtime/media` | `backup.sh` nightly (tarball) |
 | uploaded media (own object storage) | SeaweedFS data in `/opt/glowderma/runtime/object-storage` (bucket `glowderma-media`) | `backup.sh` nightly: `aws s3 sync` into `runtime/media-mirror`, then a tarball of the mirror |
 | uploaded media (external S3 provider) | the provider's bucket | not backed up here (the provider's own durability and versioning) |
 | Vault data | named volume `glowderma-<env>-vault_vault-data` | `backup.sh` nightly (Raft snapshot) |

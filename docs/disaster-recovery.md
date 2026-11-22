@@ -18,8 +18,7 @@ backup frequency (the cron line in `/etc/cron.d/glowderma-backup`).
 
 **Media by mode.**
 
-- `USE_S3=false`: `tar -xzf <env>-media-<time>.tar.gz -C /opt/glowderma/runtime/media` (owned by 10001).
-- The stack's own object storage (`OBJECT_STORAGE_ENABLED=true` and `USE_S3=true`): the nightly job first runs
+- The stack's own object storage (`OBJECT_STORAGE_ENABLED=true`): the nightly job first runs
   `aws s3 sync s3://glowderma-media/<S3_LOCATION> /mirror --delete` with the admin keys (read from the rendered
   secret files inside the container, never on a command line) into `/opt/glowderma/runtime/media-mirror`, then tars
   that mirror. Because of `--delete` the mirror equals the bucket at the last run; the older tarballs are the
@@ -86,8 +85,8 @@ without a recipient). Keep the age private key in the password manager, never on
    After a forced restore the ORIGINAL unseal keys apply again: unseal with them.
 3. `scripts/vault/configure.sh <env>` (as root): it writes fresh AppRole credentials for this server (the
    previous server's secret_ids can be revoked: `rotate-approle-secret-id.sh`).
-4. Restore media by mode (above): into `/opt/glowderma/runtime/media` (owned by 10001) for the disk; for the object
-   storage, into `runtime/media-restore` now and push it into the bucket after step 5.
+4. For bundled SeaweedFS, extract into `runtime/media-restore` now and push into the bucket after step 5.
+   For an external provider, follow its restore procedure.
 5. Deploy (workflow). The database starts empty, then `scripts/restore-postgres.sh <env> <dump>`.
 6. Move DNS. Run `scripts/healthcheck.sh <env>`.
 

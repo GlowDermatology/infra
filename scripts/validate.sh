@@ -28,10 +28,8 @@ echo "==> Compose files resolve for both environments"
 . scripts/lib.sh
 for env in staging production; do
 	d="environments/$env"
-	# MEDIA_BACKEND is computed by lib.sh (app_compose) in real use; compute it the same way here.
-	MEDIA_BACKEND="$(ENV_DIR="$d" media_backend)"
 	VAULT_AGENT_CONFIG_HASH="$(agent_config_hash)"
-	export MEDIA_BACKEND VAULT_AGENT_CONFIG_HASH
+	export VAULT_AGENT_CONFIG_HASH
 	# Three renders: the default stack, with the optional object storage, and with every profile (tools too).
 	for variant in base os os-tools; do
 		case "$variant" in
@@ -71,7 +69,7 @@ for env in ("staging", "production"):
         if line and not line.startswith("#") and "=" in line:
             k, _, v = line.partition("=")
             stack[k] = v
-    for key in ("OBJECT_STORAGE_ENABLED", "USE_S3"):
+    for key in ("OBJECT_STORAGE_ENABLED",):
         if stack.get(key) not in ("true", "false"):
             err(f"{env}: {key} in stack.env must be true or false")
     if not stack.get("S3_LOCATION"):
@@ -202,11 +200,8 @@ for env in ("staging", "production"):
         senv = app["services"][service]["environment"]
         if senv.get("S3_LOCATION") != stack.get("S3_LOCATION"):
             err(f"{env}/{service}: S3_LOCATION does not match stack.env")
-        if service != "edge" and senv.get("USE_S3") != stack.get("USE_S3"):
-            err(f"{env}/{service}: USE_S3 does not match stack.env")
-    wanted = "object-storage" if stack.get("OBJECT_STORAGE_ENABLED") == stack.get("USE_S3") == "true" else "disk"
-    if app["services"]["edge"]["environment"].get("MEDIA_BACKEND") != wanted:
-        err(f"{env}/edge: MEDIA_BACKEND must be {wanted} for OBJECT_STORAGE_ENABLED/USE_S3 in stack.env")
+    if app["services"]["edge"]["environment"].get("OBJECT_STORAGE_ENABLED") != stack.get("OBJECT_STORAGE_ENABLED"):
+        err(f"{env}/edge: OBJECT_STORAGE_ENABLED does not match stack.env")
     # Agents are recreated when vault/agent/ changes (scripts/lib.sh agent_config_hash).
     for name, svc in app["services"].items():
         if name.startswith("vault-agent") and not (svc.get("labels") or {}).get("org.glowderma.agent-config"):

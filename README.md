@@ -27,8 +27,8 @@ those repositories only **build, scan and publish images**, then write the new i
    `git log environments/production/backend/image.env` is the list of every production backend release.
 3. **Secrets live in Vault on each server**, never in GitHub or in this repository. Vault Agent sidecars render
    them into memory-only files for each container. GitHub holds only SSH access and one push token.
-4. **Same origin.** `https://<SITE_DOMAIN>/` is Next.js, `https://<SITE_DOMAIN>/api/v1/` is Django, `/media/` is
-   files. The domain is a value in `stack.env`, never in code.
+4. **Same origin.** `https://<SITE_DOMAIN>/` is Next.js, `https://<SITE_DOMAIN>/api/v1/` is Django, `/media/` serves
+   uploaded files from bundled SeaweedFS. External S3 uses its configured public media URL. The site domain is a value in `stack.env`, never in code.
 5. **Nothing destructive is automated.** No `down -v`, no volume removal, migrations run once per release with
    a database dump taken just before.
 
