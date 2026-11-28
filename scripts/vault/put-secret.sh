@@ -3,7 +3,7 @@
 # the shell history). Then makes the consumers pick it up.
 #
 #   scripts/vault/put-secret.sh <env> <django|frontend> <KEY>
-#   example: scripts/vault/put-secret.sh production django ESKIZ_PASSWORD
+#   example: scripts/vault/put-secret.sh production django DEVSMS_API_TOKEN
 #
 # Shared and infrastructure credentials have their own rotation scripts (rotate-*.sh).
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

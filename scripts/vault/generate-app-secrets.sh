@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Write the first value of every secret the stack needs, generated randomly on this server. Never overwrites
-# an existing path (re-running is safe). Provider credentials (Click, Payme, BTS, Eskiz, Billz, SMTP, OAuth
+# an existing path (re-running is safe). Provider credentials (Click, Payme, BTS, DevSMS, Billz, SMTP, OAuth
 # secrets) are added later, at go-live, with scripts/vault/put-secret.sh.
 #
 #   scripts/vault/generate-app-secrets.sh <env>
